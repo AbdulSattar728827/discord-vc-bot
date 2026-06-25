@@ -1,6 +1,5 @@
 """
 database.py — PostgreSQL connection and all data operations
-Replaces the JSON file system with a proper database.
 """
 
 import asyncpg
@@ -18,7 +17,6 @@ class Database:
         database_url = os.getenv("DATABASE_URL")
         if not database_url:
             raise ValueError("DATABASE_URL not found in environment variables!")
-
         self.pool = await asyncpg.create_pool(database_url, ssl="require")
         await self._create_tables()
         logger.info("Database connected and tables ready.")
@@ -46,6 +44,15 @@ class Database:
                     duration    TEXT NOT NULL,
                     rank        TEXT NOT NULL,
                     total_time  TEXT NOT NULL
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS vc_milestones (
+                    guild_id    TEXT NOT NULL,
+                    user_id     TEXT NOT NULL,
+                    milestone   INTEGER NOT NULL,
+                    achieved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (guild_id, user_id, milestone)
                 )
             """)
 
@@ -88,6 +95,26 @@ class Database:
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             """, guild_id, user_id, username, channel,
                 joined_at, left_at, duration_s, duration, rank, total_time)
+
+    # ── Milestones ─────────────────────────────────────────────────────────────
+
+    async def get_achieved_milestones(self, guild_id: str, user_id: str) -> list[int]:
+        """Returns list of milestone hours already achieved by this user."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT milestone FROM vc_milestones WHERE guild_id=$1 AND user_id=$2",
+                guild_id, user_id
+            )
+            return [r["milestone"] for r in rows]
+
+    async def save_milestone(self, guild_id: str, user_id: str, milestone: int):
+        """Mark a milestone as achieved — ignores if already exists."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO vc_milestones (guild_id, user_id, milestone)
+                VALUES ($1, $2, $3)
+                ON CONFLICT DO NOTHING
+            """, guild_id, user_id, milestone)
 
     async def close(self):
         if self.pool:

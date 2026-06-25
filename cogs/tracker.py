@@ -1,5 +1,5 @@
 """
-cogs/tracker.py — VC time tracker using PostgreSQL
+cogs/tracker.py — VC time tracker with milestones
 """
 
 import discord
@@ -9,6 +9,22 @@ from datetime import datetime, timezone
 from database import db
 
 logger = logging.getLogger(__name__)
+
+# ── Milestone definitions ──────────────────────────────────────────────────────
+MILESTONES = [
+    (1,    "VC Newcomer",   "🥉", "Welcome to the grind!"),
+    (5,    "VC Regular",    "🥈", "Getting serious!"),
+    (10,   "VC Dedicated",  "🥇", "True dedication!"),
+    (25,   "VC Elite",      "💎", "You're elite!"),
+    (50,   "VC Legend",     "👑", "An absolute legend!"),
+    (100,  "VC Monster",    "🔥", "Unstoppable monster!"),
+    (200,  "VC Obsessed",   "💀", "Completely obsessed!"),
+    (500,  "VC Immortal",   "⚡", "You are immortal!"),
+    (1000, "VC GOD",        "🌟", "You are a VC GOD!"),
+]
+MILESTONE_HOURS = [m[0] for m in MILESTONES]
+
+MILESTONES_CHANNEL = "🎉vc-milestones"
 
 def fmt(seconds: float) -> str:
     s = int(seconds)
@@ -49,6 +65,70 @@ class TrackerCog(commands.Cog, name="Tracker"):
 
     async def get_leaderboard(self, guild_id: str) -> list[tuple[str, float]]:
         return await db.get_leaderboard(guild_id)
+
+    # ── Milestones channel ─────────────────────────────────────────────────────
+
+    async def _get_or_create_milestones_channel(self, guild: discord.Guild):
+        ch = discord.utils.get(guild.text_channels, name=MILESTONES_CHANNEL)
+        if ch:
+            return ch
+        try:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(
+                    view_channel=True, send_messages=False, add_reactions=False
+                ),
+                guild.me: discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, embed_links=True
+                ),
+            }
+            ch = await guild.create_text_channel(
+                MILESTONES_CHANNEL,
+                overwrites=overwrites,
+                topic="🎉 VC Milestone Achievements — celebrate your fellow members!",
+            )
+            logger.info("[%s] Created #%s", guild.id, MILESTONES_CHANNEL)
+        except discord.Forbidden:
+            return None
+        return ch
+
+    async def _check_and_post_milestones(self, guild, member, total_secs):
+        total_hours = total_secs / 3600
+        gid = str(guild.id)
+        uid = str(member.id)
+
+        # Get already achieved milestones
+        achieved = await db.get_achieved_milestones(gid, uid)
+
+        for hours, title, emoji, message in MILESTONES:
+            if hours in achieved:
+                continue  # Already posted this milestone
+            if total_hours >= hours:
+                # New milestone reached!
+                await db.save_milestone(gid, uid, hours)
+
+                ch = await self._get_or_create_milestones_channel(guild)
+                if not ch:
+                    continue
+
+                e = discord.Embed(
+                    title=f"{emoji} Milestone Unlocked!",
+                    description=(
+                        f"**{member.mention}** just reached **{hours} hours** in Voice Channels!\n\n"
+                        f"🏷️ New Title: **{title}**\n"
+                        f"💬 *{message}*"
+                    ),
+                    color=0xFFD700,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                e.set_thumbnail(url=member.display_avatar.url)
+                e.set_footer(text=f"Total VC Time: {fmt(total_secs)}")
+
+                try:
+                    await ch.send(embed=e)
+                    logger.info("[%s] Milestone posted for %s: %dh (%s)",
+                                guild.id, member.display_name, hours, title)
+                except Exception as ex:
+                    logger.error("[%s] Failed to post milestone: %s", guild.id, ex)
 
     # ── Admin logs channel ─────────────────────────────────────────────────────
 
@@ -136,7 +216,7 @@ class TrackerCog(commands.Cog, name="Tracker"):
         # Save to database
         await db.add_time(gid, uid, duration)
 
-        # Get updated rank
+        # Get updated total and rank
         board = await db.get_leaderboard(gid)
         rank  = next((i+1 for i,(u,_) in enumerate(board) if u == uid), len(board))
         total = await db.get_total(gid, uid)
@@ -154,6 +234,9 @@ class TrackerCog(commands.Cog, name="Tracker"):
                     gid, member.display_name,
                     channel.name if channel else "?",
                     fmt(duration), fmt(total), rank_suffix(rank))
+
+        # Check milestones
+        await self._check_and_post_milestones(member.guild, member, total)
 
         await self._post_log_embed(
             member.guild, member,
