@@ -116,6 +116,14 @@ class Database:
                 ON CONFLICT DO NOTHING
             """, guild_id, user_id, milestone)
 
+    async def get_session_count(self, guild_id: str, user_id: str) -> int:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) as cnt FROM vc_logs WHERE guild_id=$1 AND user_id=$2",
+                guild_id, user_id
+            )
+            return row["cnt"] if row else 0
+
     async def close(self):
         if self.pool:
             await self.pool.close()

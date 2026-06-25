@@ -60,6 +60,7 @@ async def main():
     async with bot:
         await bot.load_extension("cogs.tracker")
         await bot.load_extension("cogs.leaderboard")
+        await bot.load_extension("cogs.stats")
         logger.info("All cogs loaded.")
         await bot.start(token)
 
