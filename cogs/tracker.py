@@ -60,6 +60,27 @@ class TrackerCog(commands.Cog, name="Tracker"):
     def get_logs(self, guild_id: str) -> list[dict]:
         return self.logs.get(guild_id, [])
 
+    # ── On startup: record anyone already in VC ────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """
+        When bot starts, scan all VCs and record join times for anyone
+        already sitting in a voice channel. This fixes the 'no join time'
+        problem when the bot restarts while members are in VC.
+        """
+        now = datetime.now(timezone.utc)
+        for guild in self.bot.guilds:
+            gid = str(guild.id)
+            for vc in guild.voice_channels:
+                for member in vc.members:
+                    if member.bot:
+                        continue
+                    uid = str(member.id)
+                    self._sessions.setdefault(gid, {})[uid] = now
+                    logger.info("[%s] Found %s already in #%s on startup — tracking from now",
+                                gid, member.display_name, vc.name)
+
     # ── Admin logs channel ─────────────────────────────────────────────────────
 
     async def _get_or_create_logs_channel(self, guild: discord.Guild):
@@ -85,6 +106,7 @@ class TrackerCog(commands.Cog, name="Tracker"):
                                join_time, leave_time, duration, rank):
         ch = await self._get_or_create_logs_channel(guild)
         if not ch:
+            logger.warning("[%s] Could not find or create #vc-logs", guild.id)
             return
         e = discord.Embed(title="📋 VC Session Log", color=0x57F287, timestamp=leave_time)
         e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
@@ -98,8 +120,11 @@ class TrackerCog(commands.Cog, name="Tracker"):
         e.set_footer(text=f"User ID: {member.id}")
         try:
             await ch.send(embed=e)
+            logger.info("[%s] Log posted for %s", guild.id, member.display_name)
         except discord.Forbidden:
-            pass
+            logger.error("[%s] Cannot post in #vc-logs — missing permission", guild.id)
+        except Exception as ex:
+            logger.error("[%s] Failed to post log: %s", guild.id, ex)
 
     # ── Voice state ────────────────────────────────────────────────────────────
 
@@ -107,6 +132,10 @@ class TrackerCog(commands.Cog, name="Tracker"):
     async def on_voice_state_update(self, member: discord.Member,
                                      before: discord.VoiceState,
                                      after:  discord.VoiceState):
+        # Ignore bots
+        if member.bot:
+            return
+
         gid = str(member.guild.id)
         uid = str(member.id)
         now = datetime.now(timezone.utc)
@@ -133,20 +162,22 @@ class TrackerCog(commands.Cog, name="Tracker"):
     async def _finalise(self, gid, uid, member, channel, leave_time):
         join_time = self._sessions.get(gid, {}).pop(uid, None)
         if join_time is None:
+            logger.warning("[%s] %s left #%s but had no join time — was in VC before bot started, skipping",
+                           gid, member.display_name, channel.name if channel else "?")
             return
 
         duration = (leave_time - join_time).total_seconds()
         if duration < 1:
             return
 
-        # ── Add time FIRST, then record log (so total is correct) ─────────────
+        # Add time FIRST so total is correct in the log
         self.add_time(gid, uid, duration)
 
         # Rank after adding time
         board = self.get_leaderboard(gid)
         rank  = next((i+1 for i,(u,_) in enumerate(board) if u == uid), len(board))
 
-        # Log entry
+        # Save log entry
         self.logs.setdefault(gid, []).append({
             "user_id":    uid,
             "username":   member.display_name,
