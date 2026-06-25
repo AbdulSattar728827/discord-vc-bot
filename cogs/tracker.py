@@ -53,7 +53,7 @@ class TrackerCog(commands.Cog, name="Tracker"):
     # ── Admin logs channel ─────────────────────────────────────────────────────
 
     async def _get_or_create_logs_channel(self, guild: discord.Guild):
-        ch = discord.utils.get(guild.text_channels, name="vc-logs")
+        ch = discord.utils.get(guild.text_channels, name="🔒vc-logs")
         if ch:
             return ch
         try:
@@ -64,9 +64,9 @@ class TrackerCog(commands.Cog, name="Tracker"):
             }
             if admin_role:
                 overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
-            ch = await guild.create_text_channel("vc-logs", overwrites=overwrites,
+            ch = await guild.create_text_channel("🔒vc-logs", overwrites=overwrites,
                                                   topic="🔒 Admin-only VC session logs")
-            logger.info("[%s] Created #vc-logs", guild.id)
+            logger.info("[%s] Created #🔒vc-logs", guild.id)
         except discord.Forbidden:
             return None
         return ch
@@ -120,9 +120,7 @@ class TrackerCog(commands.Cog, name="Tracker"):
         elif left:
             await self._finalise(gid, uid, member, before.channel, now)
 
-        lb = self.bot.get_cog("Leaderboard")
-        if lb:
-            await lb.schedule_refresh(member.guild)
+        # Leaderboard refreshes every 30 minutes automatically
 
     async def _finalise(self, gid, uid, member, channel, leave_time):
         join_time = self._sessions.get(gid, {}).pop(uid, None)

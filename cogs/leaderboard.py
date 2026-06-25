@@ -10,8 +10,8 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
-LEADERBOARD_CHANNEL_NAME = "vc-leaderboard"
-REFRESH_INTERVAL_MINUTES = 5
+LEADERBOARD_CHANNEL_NAME = "🏆vc-leaderboard"
+REFRESH_INTERVAL_MINUTES = 30
 
 MEDAL  = ["🥇", "🥈", "🥉"]
 COLORS = [0xFFD700, 0xC0C0C0, 0xCD7F32]
@@ -57,18 +57,7 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
     async def _before(self):
         await self.bot.wait_until_ready()
 
-    async def schedule_refresh(self, guild: discord.Guild):
-        if not self._ready:
-            return
-        gid = guild.id
-        t   = self._pending.get(gid)
-        if t and not t.done():
-            t.cancel()
-        self._pending[gid] = asyncio.create_task(self._debounced(guild))
-
-    async def _debounced(self, guild):
-        await asyncio.sleep(3)
-        await self._update(guild)
+    # Leaderboard only refreshes on timer — no instant refresh on VC events
 
     async def _get_or_create_channel(self, guild):
         ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL_NAME)
