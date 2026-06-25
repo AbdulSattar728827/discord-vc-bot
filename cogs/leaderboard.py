@@ -1,12 +1,12 @@
 """
-cogs/leaderboard.py — always delete old messages and repost fresh
-No editing. No duplicates. Simple and clean.
+cogs/leaderboard.py — leaderboard using PostgreSQL
 """
 
 import discord
 from discord.ext import commands, tasks
-import logging, asyncio, json, os
+import logging, asyncio
 from datetime import datetime, timezone
+from database import db
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,6 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
             self._locks[gid] = asyncio.Lock()
         return self._locks[gid]
 
-    # ── Auto-refresh ───────────────────────────────────────────────────────────
-
     @tasks.loop(minutes=REFRESH_INTERVAL_MINUTES)
     async def auto_refresh(self):
         if not self._ready:
@@ -58,8 +56,6 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
     @auto_refresh.before_loop
     async def _before(self):
         await self.bot.wait_until_ready()
-
-    # ── Debounced on-demand ────────────────────────────────────────────────────
 
     async def schedule_refresh(self, guild: discord.Guild):
         if not self._ready:
@@ -73,8 +69,6 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
     async def _debounced(self, guild):
         await asyncio.sleep(3)
         await self._update(guild)
-
-    # ── Channel ────────────────────────────────────────────────────────────────
 
     async def _get_or_create_channel(self, guild):
         ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL_NAME)
@@ -92,14 +86,8 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
             return None
         return ch
 
-    # ── Build embeds ───────────────────────────────────────────────────────────
-
     async def _build_embeds(self, guild) -> list[discord.Embed]:
-        tracker = self.bot.get_cog("Tracker")
-        if not tracker:
-            return []
-
-        board = tracker.get_leaderboard(str(guild.id))
+        board = await db.get_leaderboard(str(guild.id))
         now   = datetime.now(timezone.utc)
 
         if not board:
@@ -113,7 +101,6 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
 
         embeds = []
 
-        # Top-3 highlight cards
         for i, (uid, secs) in enumerate(board[:3]):
             member = guild.get_member(int(uid))
             name   = member.display_name if member else f"Unknown ({uid})"
@@ -123,13 +110,12 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
                 description=f"**{name}**",
                 color=COLORS[i], timestamp=now,
             )
-            e.add_field(name="⏱️ Total Time", value=fmt(secs),          inline=True)
-            e.add_field(name="🏅 Rank",        value=rank_suffix(i+1),   inline=True)
+            e.add_field(name="⏱️ Total Time", value=fmt(secs),         inline=True)
+            e.add_field(name="🏅 Rank",        value=rank_suffix(i+1),  inline=True)
             if avatar:
                 e.set_thumbnail(url=avatar)
             embeds.append(e)
 
-        # Full ranked list
         rows = []
         for i, (uid, secs) in enumerate(board):
             member = guild.get_member(int(uid))
@@ -149,33 +135,24 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
 
         return embeds
 
-    # ── Core update: ALWAYS wipe then repost ──────────────────────────────────
-
     async def _update(self, guild):
         async with self._lock(guild.id):
             channel = await self._get_or_create_channel(guild)
             if not channel:
                 return
-
             embeds = await self._build_embeds(guild)
             if not embeds:
                 return
-
-            # Delete ALL previous bot messages
             try:
                 await channel.purge(limit=100, check=lambda m: m.author.id == guild.me.id)
-            except Exception as ex:
-                logger.warning("[%s] Purge failed: %s", guild.id, ex)
-
-            # Post fresh
+            except Exception:
+                pass
             try:
                 for embed in embeds:
                     await channel.send(embed=embed)
-                logger.info("[%s] Leaderboard posted (%d msgs).", guild.id, len(embeds))
+                logger.info("[%s] Leaderboard posted.", guild.id)
             except discord.Forbidden:
                 logger.error("[%s] Cannot post in #%s.", guild.id, LEADERBOARD_CHANNEL_NAME)
-
-    # ── Slash command ──────────────────────────────────────────────────────────
 
     @discord.app_commands.command(
         name="refresh_leaderboard",

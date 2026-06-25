@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import os, logging, asyncio
 from dotenv import load_dotenv
+from database import db
 
 load_dotenv()
 os.makedirs("data", exist_ok=True)
@@ -10,7 +11,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("data/bot.log", encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
@@ -36,7 +36,6 @@ async def on_ready():
     except Exception as e:
         logger.error(f"Slash sync failed: {e}")
 
-    # Post leaderboard and start auto-refresh
     lb = bot.get_cog("Leaderboard")
     if lb:
         for guild in bot.guilds:
@@ -53,7 +52,11 @@ async def on_error(event, *args, **kwargs):
 async def main():
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        raise ValueError("DISCORD_TOKEN not found in .env file!")
+        raise ValueError("DISCORD_TOKEN not found!")
+
+    # Connect to database first
+    await db.connect()
+
     async with bot:
         await bot.load_extension("cogs.tracker")
         await bot.load_extension("cogs.leaderboard")

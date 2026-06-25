@@ -1,26 +1,14 @@
 """
-cogs/tracker.py — VC time tracker with correct cumulative totals
+cogs/tracker.py — VC time tracker using PostgreSQL
 """
 
 import discord
 from discord.ext import commands
-import json, os, logging
+import logging
 from datetime import datetime, timezone
+from database import db
 
-logger     = logging.getLogger(__name__)
-STATS_FILE = "data/vc_stats.json"
-LOGS_FILE  = "data/vc_logs.json"
-
-def _load(path, default):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
-
-def _save(path, data):
-    os.makedirs("data", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+logger = logging.getLogger(__name__)
 
 def fmt(seconds: float) -> str:
     s = int(seconds)
@@ -38,37 +26,13 @@ def rank_suffix(n: int) -> str:
 class TrackerCog(commands.Cog, name="Tracker"):
 
     def __init__(self, bot):
-        self.bot      = bot
+        self.bot = bot
         self._sessions: dict[str, dict[str, datetime]] = {}
-        self.stats: dict[str, dict[str, float]] = _load(STATS_FILE, {})
-        self.logs:  dict[str, list]             = _load(LOGS_FILE,  {})
-
-    def save(self):
-        _save(STATS_FILE, self.stats)
-        _save(LOGS_FILE,  self.logs)
-
-    def get_total(self, guild_id: str, user_id: str) -> float:
-        return self.stats.get(guild_id, {}).get(user_id, 0.0)
-
-    def add_time(self, guild_id: str, user_id: str, seconds: float):
-        self.stats.setdefault(guild_id, {})
-        self.stats[guild_id][user_id] = self.stats[guild_id].get(user_id, 0.0) + seconds
-
-    def get_leaderboard(self, guild_id: str) -> list[tuple[str, float]]:
-        return sorted(self.stats.get(guild_id, {}).items(), key=lambda x: x[1], reverse=True)
-
-    def get_logs(self, guild_id: str) -> list[dict]:
-        return self.logs.get(guild_id, [])
 
     # ── On startup: record anyone already in VC ────────────────────────────────
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """
-        When bot starts, scan all VCs and record join times for anyone
-        already sitting in a voice channel. This fixes the 'no join time'
-        problem when the bot restarts while members are in VC.
-        """
         now = datetime.now(timezone.utc)
         for guild in self.bot.guilds:
             gid = str(guild.id)
@@ -78,8 +42,13 @@ class TrackerCog(commands.Cog, name="Tracker"):
                         continue
                     uid = str(member.id)
                     self._sessions.setdefault(gid, {})[uid] = now
-                    logger.info("[%s] Found %s already in #%s on startup — tracking from now",
+                    logger.info("[%s] Found %s already in #%s on startup",
                                 gid, member.display_name, vc.name)
+
+    # ── Leaderboard data accessor ──────────────────────────────────────────────
+
+    async def get_leaderboard(self, guild_id: str) -> list[tuple[str, float]]:
+        return await db.get_leaderboard(guild_id)
 
     # ── Admin logs channel ─────────────────────────────────────────────────────
 
@@ -106,23 +75,20 @@ class TrackerCog(commands.Cog, name="Tracker"):
                                join_time, leave_time, duration, rank):
         ch = await self._get_or_create_logs_channel(guild)
         if not ch:
-            logger.warning("[%s] Could not find or create #vc-logs", guild.id)
             return
+        total = await db.get_total(str(guild.id), str(member.id))
         e = discord.Embed(title="📋 VC Session Log", color=0x57F287, timestamp=leave_time)
         e.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-        e.add_field(name="👤 Member",        value=member.mention,                          inline=True)
-        e.add_field(name="🏅 Rank",          value=rank_suffix(rank),                       inline=True)
-        e.add_field(name="🎙️ Channel",      value=f"#{channel_name}",                      inline=True)
-        e.add_field(name="🕐 Joined",        value=f"<t:{int(join_time.timestamp())}:T>",   inline=True)
-        e.add_field(name="🕐 Left",          value=f"<t:{int(leave_time.timestamp())}:T>",  inline=True)
-        e.add_field(name="⏱️ Session",       value=fmt(duration),                           inline=True)
-        e.add_field(name="📊 Total VC Time", value=fmt(self.get_total(str(guild.id), str(member.id))), inline=True)
+        e.add_field(name="👤 Member",        value=member.mention,                         inline=True)
+        e.add_field(name="🏅 Rank",          value=rank_suffix(rank),                      inline=True)
+        e.add_field(name="🎙️ Channel",      value=f"#{channel_name}",                     inline=True)
+        e.add_field(name="🕐 Joined",        value=f"<t:{int(join_time.timestamp())}:T>",  inline=True)
+        e.add_field(name="🕐 Left",          value=f"<t:{int(leave_time.timestamp())}:T>", inline=True)
+        e.add_field(name="⏱️ Session",       value=fmt(duration),                          inline=True)
+        e.add_field(name="📊 Total VC Time", value=fmt(total),                             inline=True)
         e.set_footer(text=f"User ID: {member.id}")
         try:
             await ch.send(embed=e)
-            logger.info("[%s] Log posted for %s", guild.id, member.display_name)
-        except discord.Forbidden:
-            logger.error("[%s] Cannot post in #vc-logs — missing permission", guild.id)
         except Exception as ex:
             logger.error("[%s] Failed to post log: %s", guild.id, ex)
 
@@ -132,7 +98,6 @@ class TrackerCog(commands.Cog, name="Tracker"):
     async def on_voice_state_update(self, member: discord.Member,
                                      before: discord.VoiceState,
                                      after:  discord.VoiceState):
-        # Ignore bots
         if member.bot:
             return
 
@@ -162,39 +127,35 @@ class TrackerCog(commands.Cog, name="Tracker"):
     async def _finalise(self, gid, uid, member, channel, leave_time):
         join_time = self._sessions.get(gid, {}).pop(uid, None)
         if join_time is None:
-            logger.warning("[%s] %s left #%s but had no join time — was in VC before bot started, skipping",
-                           gid, member.display_name, channel.name if channel else "?")
+            logger.warning("[%s] %s left but had no join time recorded",
+                           gid, member.display_name)
             return
 
         duration = (leave_time - join_time).total_seconds()
         if duration < 1:
             return
 
-        # Add time FIRST so total is correct in the log
-        self.add_time(gid, uid, duration)
+        # Save to database
+        await db.add_time(gid, uid, duration)
 
-        # Rank after adding time
-        board = self.get_leaderboard(gid)
+        # Get updated rank
+        board = await db.get_leaderboard(gid)
         rank  = next((i+1 for i,(u,_) in enumerate(board) if u == uid), len(board))
+        total = await db.get_total(gid, uid)
 
-        # Save log entry
-        self.logs.setdefault(gid, []).append({
-            "user_id":    uid,
-            "username":   member.display_name,
-            "channel":    channel.name if channel else "Unknown",
-            "joined_at":  join_time.isoformat(),
-            "left_at":    leave_time.isoformat(),
-            "duration_s": round(duration, 2),
-            "duration":   fmt(duration),
-            "rank":       rank_suffix(rank),
-            "total_time": fmt(self.get_total(gid, uid)),
-        })
-        self.save()
+        # Save log
+        await db.add_log(
+            gid, uid, member.display_name,
+            channel.name if channel else "Unknown",
+            join_time, leave_time,
+            round(duration, 2), fmt(duration),
+            rank_suffix(rank), fmt(total)
+        )
 
         logger.info("[%s] %s left #%s | session %s | total %s | rank %s",
                     gid, member.display_name,
                     channel.name if channel else "?",
-                    fmt(duration), fmt(self.get_total(gid, uid)), rank_suffix(rank))
+                    fmt(duration), fmt(total), rank_suffix(rank))
 
         await self._post_log_embed(
             member.guild, member,
