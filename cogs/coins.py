@@ -377,14 +377,8 @@ class CoinsCog(commands.Cog, name="Coins"):
                     guild.id, member.display_name, is_private,
                     category.name if category else "None")
 
-        # Force fetch fresh guild to avoid stale permission cache
-        try:
-            guild = await self.bot.fetch_guild(guild.id)
-            member = await guild.fetch_member(member.id)
-            if category:
-                category = guild.get_channel(category.id)
-        except Exception as ex:
-            logger.warning("[%s] Could not refresh guild/member: %s", guild.id, ex)
+        # Store category id before any fetch
+        category_id = category.id if category else None
 
         # Check coins for private VC (skip for admins/mods)
         if is_private and not self._is_admin(member):
@@ -438,7 +432,8 @@ class CoinsCog(commands.Cog, name="Coins"):
             # Deduct coins
             await db.spend_coins(gid, uid, PRIVATE_VC_COST)
 
-        # Get category prefix for naming
+        # Get fresh category object
+        category = guild.get_channel(category_id) if category_id else None
         cat_upper = category.name.upper() if category else ""
         prefix    = next((v for k, v in CATEGORY_PREFIX.items() if k in cat_upper), "VC")
 
