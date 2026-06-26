@@ -377,6 +377,15 @@ class CoinsCog(commands.Cog, name="Coins"):
                     guild.id, member.display_name, is_private,
                     category.name if category else "None")
 
+        # Force fetch fresh guild to avoid stale permission cache
+        try:
+            guild = await self.bot.fetch_guild(guild.id)
+            member = await guild.fetch_member(member.id)
+            if category:
+                category = guild.get_channel(category.id)
+        except Exception as ex:
+            logger.warning("[%s] Could not refresh guild/member: %s", guild.id, ex)
+
         # Check coins for private VC (skip for admins/mods)
         if is_private and not self._is_admin(member):
             coin_data = await db.get_coins(gid, uid)
