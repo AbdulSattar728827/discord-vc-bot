@@ -334,7 +334,7 @@ class CoinsCog(commands.Cog, name="Coins"):
             elif vc is None:
                 self._managed_vcs.pop(before.channel.id, None)
 
-        # If member joined a managed private VC (dragged in) — give them speak permissions
+        # If member joined a managed private VC (dragged in) — give them full speak permissions
         if (after.channel and
             after.channel.id in self._managed_vcs and
             self._managed_vcs[after.channel.id].get("type") == "private" and
@@ -342,13 +342,18 @@ class CoinsCog(commands.Cog, name="Coins"):
             try:
                 await after.channel.set_permissions(
                     member,
-                    view_channel=True, connect=True,
-                    speak=True, stream=True, use_voice_activation=True
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    stream=True,
+                    use_voice_activation=True,
+                    deafen_members=False,
+                    mute_members=False,
                 )
-                logger.info("[%s] Gave speak perms to %s in private VC",
+                logger.info("[%s] Gave full audio perms to %s in private VC",
                             guild.id, member.display_name)
             except Exception as ex:
-                logger.warning("[%s] Could not set perms for dragged member: %s", guild.id, ex)
+                logger.warning("[%s] Could not set perms for member: %s", guild.id, ex)
 
     # ── Handle join-to-create ──────────────────────────────────────────────────
 
@@ -420,26 +425,45 @@ class CoinsCog(commands.Cog, name="Coins"):
             vc_name    = "🔒 Private VC"
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(
-                    view_channel=False, connect=False
+                    view_channel=False,
+                    connect=False,
+                    speak=False,
+                    stream=False,
+                    use_voice_activation=False,
                 ),
                 member: discord.PermissionOverwrite(
-                    view_channel=True, connect=True,
-                    speak=True, stream=True, use_voice_activation=True,
-                    move_members=True
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    stream=True,
+                    use_voice_activation=True,
+                    move_members=True,
+                    deafen_members=False,
+                    mute_members=False,
                 ),
                 guild.me: discord.PermissionOverwrite(
-                    view_channel=True, connect=True,
-                    manage_channels=True, move_members=True,
-                    speak=True
+                    view_channel=True,
+                    connect=True,
+                    speak=True,
+                    stream=True,
+                    manage_channels=True,
+                    move_members=True,
+                    mute_members=True,
+                    deafen_members=True,
                 ),
             }
-            # Give admin roles full access
+            # Give ALL admin/mod roles full audio access
             for role in guild.roles:
                 if role.permissions.administrator or role.permissions.manage_channels:
                     overwrites[role] = discord.PermissionOverwrite(
-                        view_channel=True, connect=True,
-                        speak=True, stream=True,
-                        move_members=True
+                        view_channel=True,
+                        connect=True,
+                        speak=True,
+                        stream=True,
+                        use_voice_activation=True,
+                        move_members=True,
+                        mute_members=True,
+                        deafen_members=True,
                     )
         else:
             existing = [
