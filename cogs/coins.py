@@ -486,14 +486,23 @@ class CoinsCog(commands.Cog, name="Coins"):
             }
 
         try:
-            # Singapore region — correct Discord API region string
-            new_vc = await guild.create_voice_channel(
-                vc_name,
-                category=category,
-                overwrites=overwrites,
-                rtc_region="singapore",
-            )
-            # Force set region via edit in case create didn't apply it
+            # Try creating in category first, fallback to no category
+            try:
+                new_vc = await guild.create_voice_channel(
+                    vc_name,
+                    category=category,
+                    overwrites=overwrites,
+                    rtc_region="singapore",
+                )
+            except discord.Forbidden:
+                logger.warning("[%s] Cannot create in category %s, trying without category",
+                               guild.id, category.name if category else "None")
+                new_vc = await guild.create_voice_channel(
+                    vc_name,
+                    overwrites=overwrites,
+                    rtc_region="singapore",
+                )
+            # Force set region
             try:
                 await new_vc.edit(rtc_region="singapore")
             except Exception:
