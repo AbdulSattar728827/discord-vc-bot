@@ -39,6 +39,8 @@ def _find_category(guild: discord.Guild, keyword: str):
         guild.categories
     )
 
+VC_HOST_ROLE = "🎙️ VC Host"
+
 def rank_suffix(n: int) -> str:
     if 11 <= (n % 100) <= 13: return f"{n}th"
     return {1:f"{n}st",2:f"{n}nd",3:f"{n}rd"}.get(n%10, f"{n}th")
@@ -66,6 +68,42 @@ class CoinsCog(commands.Cog, name="Coins"):
             member.guild_permissions.administrator or
             member.guild_permissions.manage_channels
         )
+
+    async def _get_or_create_vc_host_role(self, guild: discord.Guild) -> discord.Role | None:
+        """Get or create the temporary VC Host role with Move Members permission."""
+        role = discord.utils.get(guild.roles, name=VC_HOST_ROLE)
+        if role:
+            return role
+        try:
+            role = await guild.create_role(
+                name=VC_HOST_ROLE,
+                permissions=discord.Permissions(move_members=True),
+                color=discord.Color.gold(),
+                reason="Temporary role for Private VC creators",
+            )
+            logger.info("[%s] Created role '%s'", guild.id, VC_HOST_ROLE)
+        except discord.Forbidden:
+            logger.error("[%s] Cannot create VC Host role — missing permission", guild.id)
+            return None
+        return role
+
+    async def _assign_vc_host_role(self, member: discord.Member):
+        role = await self._get_or_create_vc_host_role(member.guild)
+        if role and role not in member.roles:
+            try:
+                await member.add_roles(role, reason="Created private VC")
+                logger.info("[%s] Assigned VC Host role to %s", member.guild.id, member.display_name)
+            except discord.Forbidden:
+                logger.error("[%s] Cannot assign VC Host role", member.guild.id)
+
+    async def _remove_vc_host_role(self, member: discord.Member):
+        role = discord.utils.get(member.guild.roles, name=VC_HOST_ROLE)
+        if role and role in member.roles:
+            try:
+                await member.remove_roles(role, reason="Private VC deleted")
+                logger.info("[%s] Removed VC Host role from %s", member.guild.id, member.display_name)
+            except discord.Forbidden:
+                pass
 
     # ── Coins leaderboard channel ──────────────────────────────────────────────
 
@@ -246,11 +284,19 @@ class CoinsCog(commands.Cog, name="Coins"):
                 self._processing.discard(key)
             return
 
-        # Bug fix 2 & 4: instant delete when VC is empty (no timer/delay)
+        # Instant delete when VC is empty (no timer/delay)
         if before.channel and before.channel.id in self._managed_vcs:
             vc = guild.get_channel(before.channel.id)
             if vc is not None and len(vc.members) == 0:
                 try:
+                    vc_info = self._managed_vcs.get(before.channel.id, {})
+                    # Remove VC Host role from creator if private VC
+                    if vc_info.get("type") == "private":
+                        host_id = vc_info.get("host_id")
+                        if host_id:
+                            host = guild.get_member(int(host_id))
+                            if host:
+                                await self._remove_vc_host_role(host)
                     await vc.delete(reason="Auto-delete: VC is empty")
                     self._managed_vcs.pop(before.channel.id, None)
                     logger.info("[%s] Instantly deleted empty VC: %s", guild.id, vc.name)
@@ -380,10 +426,16 @@ class CoinsCog(commands.Cog, name="Coins"):
             self._managed_vcs[new_vc.id] = {
                 "type":       "private" if is_private else "public",
                 "creator_id": uid,
+                "host_id":    uid if is_private else None,
             }
 
             # Bug fix 1: move member to the new VC
             await member.move_to(new_vc)
+
+            # Give creator VC Host role so they can drag members
+            if is_private:
+                await self._assign_vc_host_role(member)
+                self._managed_vcs[new_vc.id]["host_id"] = uid
             logger.info("[%s] Created %s VC '%s' for %s — moved member",
                         guild.id, "private" if is_private else "public",
                         vc_name, member.display_name)
