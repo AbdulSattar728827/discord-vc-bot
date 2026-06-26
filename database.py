@@ -264,6 +264,48 @@ class Database:
                 result.append((r["user_id"], r["total_secs"], streak))
             return result
 
+    # ── Admin methods ──────────────────────────────────────────────────────────
+
+    async def set_time(self, guild_id: str, user_id: str, seconds: float):
+        """Set a member's total VC time to a specific value."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO vc_stats (guild_id, user_id, total_secs)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (guild_id, user_id)
+                DO UPDATE SET total_secs = $3
+            """, guild_id, user_id, max(0.0, seconds))
+
+    async def modify_streak(self, guild_id: str, user_id: str, days: int):
+        """Add or remove days from a member's current streak."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT current_streak, longest_streak FROM vc_streaks WHERE guild_id=$1 AND user_id=$2",
+                guild_id, user_id
+            )
+            if not row:
+                new_streak  = max(0, days)
+                long_streak = new_streak
+                await conn.execute("""
+                    INSERT INTO vc_streaks (guild_id, user_id, current_streak, longest_streak)
+                    VALUES ($1, $2, $3, $4)
+                """, guild_id, user_id, new_streak, long_streak)
+            else:
+                new_streak  = max(0, row["current_streak"] + days)
+                long_streak = max(row["longest_streak"], new_streak)
+                await conn.execute("""
+                    UPDATE vc_streaks SET current_streak=$3, longest_streak=$4
+                    WHERE guild_id=$1 AND user_id=$2
+                """, guild_id, user_id, new_streak, long_streak)
+
+    async def reset_streak(self, guild_id: str, user_id: str):
+        """Reset a member's current streak to zero."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE vc_streaks SET current_streak=0
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id)
+
     async def close(self):
         if self.pool:
             await self.pool.close()
