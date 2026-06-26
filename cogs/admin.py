@@ -245,6 +245,75 @@ class AdminCog(commands.Cog, name="Admin"):
         await interaction.followup.send(embed=e, ephemeral=True)
 
 
+    # ── Coin Management ────────────────────────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="addcoins",
+        description="Add Cheese Coins to a member (admin only).",
+    )
+    @discord.app_commands.describe(member="The member to add coins to", amount="Number of coins to add")
+    @discord.app_commands.default_permissions(administrator=True)
+    async def addcoins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        await interaction.response.defer(ephemeral=True)
+        if amount <= 0:
+            await interaction.followup.send("❌ Amount must be positive!", ephemeral=True)
+            return
+        gid = str(interaction.guild.id)
+        uid = str(member.id)
+        await db.add_coins(gid, uid, amount)
+        coin_data = await db.get_coins(gid, uid)
+        e = discord.Embed(title="✅ Coins Added", color=0xFFD700, timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Member",      value=member.mention,              inline=True)
+        e.add_field(name="➕ Added",        value=f"{amount} 🧀",              inline=True)
+        e.add_field(name="💰 New Balance", value=f"{coin_data['coins']} 🧀",  inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="removecoins",
+        description="Remove Cheese Coins from a member (admin only).",
+    )
+    @discord.app_commands.describe(member="The member to remove coins from", amount="Number of coins to remove")
+    @discord.app_commands.default_permissions(administrator=True)
+    async def removecoins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        await interaction.response.defer(ephemeral=True)
+        if amount <= 0:
+            await interaction.followup.send("❌ Amount must be positive!", ephemeral=True)
+            return
+        gid = str(interaction.guild.id)
+        uid = str(member.id)
+        await db.remove_coins(gid, uid, amount)
+        coin_data = await db.get_coins(gid, uid)
+        e = discord.Embed(title="✅ Coins Removed", color=0xED4245, timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Member",      value=member.mention,              inline=True)
+        e.add_field(name="➖ Removed",      value=f"{amount} 🧀",              inline=True)
+        e.add_field(name="💰 New Balance", value=f"{coin_data['coins']} 🧀",  inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="setcoins",
+        description="Set a member's Cheese Coins to exact amount (admin only).",
+    )
+    @discord.app_commands.describe(member="The member to set coins for", amount="Exact coin amount")
+    @discord.app_commands.default_permissions(administrator=True)
+    async def setcoins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        await interaction.response.defer(ephemeral=True)
+        if amount < 0:
+            await interaction.followup.send("❌ Amount cannot be negative!", ephemeral=True)
+            return
+        gid = str(interaction.guild.id)
+        uid = str(member.id)
+        await db.set_coins(gid, uid, amount)
+        e = discord.Embed(title="✅ Coins Set", color=0xFEE75C, timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Member",      value=member.mention,   inline=True)
+        e.add_field(name="💰 New Balance", value=f"{amount} 🧀",   inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))
     logger.info("AdminCog loaded.")

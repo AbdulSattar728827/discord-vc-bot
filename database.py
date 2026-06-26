@@ -66,6 +66,16 @@ class Database:
                     PRIMARY KEY (guild_id, user_id)
                 )
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS cheese_coins (
+                    guild_id        TEXT NOT NULL,
+                    user_id         TEXT NOT NULL,
+                    coins           INTEGER NOT NULL DEFAULT 0,
+                    total_earned    INTEGER NOT NULL DEFAULT 0,
+                    pending_secs    DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
 
     # ── Stats ──────────────────────────────────────────────────────────────────
 
@@ -263,6 +273,101 @@ class Database:
                     streak = 0
                 result.append((r["user_id"], r["total_secs"], streak))
             return result
+
+    # ── Cheese Coins ───────────────────────────────────────────────────────────
+
+    COIN_THRESHOLD_SECS = 30 * 60  # 30 minutes = 1 coin
+
+    async def get_coins(self, guild_id: str, user_id: str) -> dict:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT coins, total_earned, pending_secs FROM cheese_coins WHERE guild_id=$1 AND user_id=$2",
+                guild_id, user_id
+            )
+            if not row:
+                return {"coins": 0, "total_earned": 0, "pending_secs": 0.0}
+            return {"coins": row["coins"], "total_earned": row["total_earned"], "pending_secs": row["pending_secs"]}
+
+    async def add_session_coins(self, guild_id: str, user_id: str, session_secs: float) -> int:
+        """Add pending seconds and award coins if threshold met. Returns coins earned."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT coins, total_earned, pending_secs FROM cheese_coins WHERE guild_id=$1 AND user_id=$2",
+                guild_id, user_id
+            )
+            pending = (row["pending_secs"] if row else 0.0) + session_secs
+            coins_earned = int(pending // self.COIN_THRESHOLD_SECS)
+            remaining    = pending % self.COIN_THRESHOLD_SECS
+
+            if not row:
+                await conn.execute("""
+                    INSERT INTO cheese_coins (guild_id, user_id, coins, total_earned, pending_secs)
+                    VALUES ($1, $2, $3, $4, $5)
+                """, guild_id, user_id, coins_earned, coins_earned, remaining)
+            else:
+                await conn.execute("""
+                    UPDATE cheese_coins
+                    SET coins=$3, total_earned=$4, pending_secs=$5
+                    WHERE guild_id=$1 AND user_id=$2
+                """, guild_id, user_id,
+                    row["coins"] + coins_earned,
+                    row["total_earned"] + coins_earned,
+                    remaining)
+            return coins_earned
+
+    async def spend_coins(self, guild_id: str, user_id: str, amount: int) -> bool:
+        """Spend coins. Returns True if successful, False if not enough coins."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT coins FROM cheese_coins WHERE guild_id=$1 AND user_id=$2",
+                guild_id, user_id
+            )
+            if not row or row["coins"] < amount:
+                return False
+            await conn.execute("""
+                UPDATE cheese_coins SET coins = coins - $3
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id, amount)
+            return True
+
+    async def add_coins(self, guild_id: str, user_id: str, amount: int):
+        """Admin: add coins to a member."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO cheese_coins (guild_id, user_id, coins, total_earned)
+                VALUES ($1, $2, $3, $3)
+                ON CONFLICT (guild_id, user_id)
+                DO UPDATE SET coins = cheese_coins.coins + $3,
+                              total_earned = cheese_coins.total_earned + $3
+            """, guild_id, user_id, amount)
+
+    async def remove_coins(self, guild_id: str, user_id: str, amount: int):
+        """Admin: remove coins from a member (won't go below 0)."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE cheese_coins
+                SET coins = GREATEST(0, coins - $3)
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id, amount)
+
+    async def set_coins(self, guild_id: str, user_id: str, amount: int):
+        """Admin: set coins to exact amount."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO cheese_coins (guild_id, user_id, coins, total_earned)
+                VALUES ($1, $2, $3, $3)
+                ON CONFLICT (guild_id, user_id)
+                DO UPDATE SET coins = $3
+            """, guild_id, user_id, max(0, amount))
+
+    async def get_coins_leaderboard(self, guild_id: str) -> list[tuple[str, int]]:
+        """Returns [(user_id, coins), ...] sorted by coins descending."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, coins FROM cheese_coins WHERE guild_id=$1 AND coins > 0 ORDER BY coins DESC",
+                guild_id
+            )
+            return [(r["user_id"], r["coins"]) for r in rows]
 
     # ── Admin methods ──────────────────────────────────────────────────────────
 

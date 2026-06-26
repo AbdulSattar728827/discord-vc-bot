@@ -63,6 +63,7 @@ class StatsCog(commands.Cog, name="Stats"):
         rank          = next((i+1 for i,(u,_) in enumerate(board) if u == uid), None)
         session_count = await db.get_session_count(gid, uid)
         streak_data   = await db.get_streak(gid, uid)
+        coin_data     = await db.get_coins(gid, uid)
         current_streak = streak_data["current_streak"]
         longest_streak = streak_data["longest_streak"]
         title, title_emoji = get_current_title(total_hours)
@@ -79,6 +80,7 @@ class StatsCog(commands.Cog, name="Stats"):
         e.add_field(name="🏅 Rank",              value=rank_suffix(rank) if rank else "Unranked",        inline=True)
         e.add_field(name="🎮 Sessions",          value=str(session_count),                               inline=True)
         e.add_field(name=f"{title_emoji} Title", value=title,                                            inline=True)
+        e.add_field(name="🧀 Cheese Coins",      value=f"{coin_data['coins']} coins",                   inline=True)
 
         if session_count > 0:
             avg = total_secs / session_count

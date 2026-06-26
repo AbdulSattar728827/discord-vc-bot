@@ -224,6 +224,11 @@ class TrackerCog(commands.Cog, name="Tracker"):
                     channel.name if channel else "?",
                     fmt(duration), fmt(total), rank_suffix(rank), current_streak)
 
+        # Award coins
+        coins_earned = await db.add_session_coins(gid, uid, duration)
+        if coins_earned > 0:
+            logger.info("[%s] %s earned %d 🧀 coin(s)", gid, member.display_name, coins_earned)
+
         # Check milestones
         await self._check_and_post_milestones(member.guild, member, total)
 
