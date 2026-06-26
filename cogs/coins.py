@@ -3,9 +3,10 @@ cogs/coins.py — Cheese Coins system
 - Members earn 1 coin per 30 mins in VC
 - /coins command to check balance
 - #🧀cheese-coins leaderboard channel
-- /createvc to create public/private VCs
+- #🧀cheese-logs public activity log
 - Join-to-create VCs in each game category
-- Auto-delete VCs when empty
+- Auto-delete VCs instantly when empty
+- Singapore region for all created VCs
 """
 
 import discord
@@ -17,17 +18,15 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
-COIN_EMOJI       = "🧀"
-COINS_CHANNEL    = "🧀cheese-coins"
-PRIVATE_VC_COST  = 5
-JOIN_PUBLIC_NAME = "➕ Join To Create Public VC"
-JOIN_PRIVATE_NAME= "➕ Join To Create Private VC"
+COIN_EMOJI        = "🧀"
+COINS_CHANNEL     = "🧀cheese-coins"
+LOGS_CHANNEL      = "🧀cheese-logs"
+PRIVATE_VC_COST   = 5
+JOIN_PUBLIC_NAME  = "➕ Join To Create Public VC"
+JOIN_PRIVATE_NAME = "➕ Join To Create Private VC"
 
-# Game categories — bot will find categories CONTAINING these keywords
-GAME_CATEGORIES  = ["AGE OF EMPIRES IV", "DOTA 2", "COUNTER STRIKE", "VALORANT"]
-
-# Category prefix for public VC names
-CATEGORY_PREFIX  = {
+GAME_CATEGORIES = ["AGE OF EMPIRES IV", "DOTA 2", "COUNTER STRIKE", "VALORANT"]
+CATEGORY_PREFIX = {
     "AGE OF EMPIRES IV": "AOE",
     "DOTA 2":            "DOTA",
     "COUNTER STRIKE":    "CS",
@@ -35,7 +34,6 @@ CATEGORY_PREFIX  = {
 }
 
 def _find_category(guild: discord.Guild, keyword: str):
-    """Find a category that CONTAINS the keyword (case insensitive)."""
     return discord.utils.find(
         lambda c: keyword.upper() in c.name.upper(),
         guild.categories
@@ -50,7 +48,7 @@ class CoinsCog(commands.Cog, name="Coins"):
 
     def __init__(self, bot):
         self.bot = bot
-        # track created VCs: {vc_id: {"type": "public"/"private", "creator_id": uid}}
+        # {vc_id: {"type": "public"/"private", "creator_id": uid}}
         self._managed_vcs: dict[int, dict] = {}
         self.coins_refresh.start()
         self.vc_cleanup.start()
@@ -61,8 +59,6 @@ class CoinsCog(commands.Cog, name="Coins"):
         if self.vc_cleanup.is_running():
             self.vc_cleanup.cancel()
 
-    # ── Is admin/mod ───────────────────────────────────────────────────────────
-
     def _is_admin(self, member: discord.Member) -> bool:
         return (
             member.guild_permissions.administrator or
@@ -72,7 +68,6 @@ class CoinsCog(commands.Cog, name="Coins"):
     # ── Coins leaderboard channel ──────────────────────────────────────────────
 
     async def _get_or_create_coins_channel(self, guild: discord.Guild):
-        # Search for channel containing the name to handle any duplicates
         ch = discord.utils.get(guild.text_channels, name=COINS_CHANNEL)
         if ch:
             return ch
@@ -116,7 +111,6 @@ class CoinsCog(commands.Cog, name="Coins"):
                 member = guild.get_member(int(uid))
                 name   = member.display_name if member else f"Unknown ({uid})"
                 rows.append(f"`{rank_suffix(i+1):>4}`  **{name}**  —  {coins} {COIN_EMOJI}")
-
             e = discord.Embed(
                 title=f"{COIN_EMOJI} Cheese Coins Leaderboard",
                 description="\n".join(rows),
@@ -139,7 +133,48 @@ class CoinsCog(commands.Cog, name="Coins"):
     async def _before_coins(self):
         await self.bot.wait_until_ready()
 
-    # ── Setup join-to-create VCs in game categories ───────────────────────────
+    # ── Cheese logs channel ────────────────────────────────────────────────────
+
+    async def _get_or_create_logs_channel(self, guild: discord.Guild):
+        ch = discord.utils.get(guild.text_channels, name=LOGS_CHANNEL)
+        if ch:
+            return ch
+        try:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(
+                    view_channel=True, send_messages=False
+                ),
+                guild.me: discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, embed_links=True
+                ),
+            }
+            ch = await guild.create_text_channel(
+                LOGS_CHANNEL, overwrites=overwrites,
+                topic="🧀 Cheese Coins activity log — VC creations and coin transactions",
+            )
+            logger.info("[%s] Created #%s", guild.id, LOGS_CHANNEL)
+        except discord.Forbidden:
+            return None
+        return ch
+
+    async def _post_coins_log(self, guild, member, title, description, color=0xFFD700):
+        ch = await self._get_or_create_logs_channel(guild)
+        if not ch:
+            return
+        e = discord.Embed(
+            title=title,
+            description=description,
+            color=color,
+            timestamp=datetime.now(timezone.utc),
+        )
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.set_footer(text=f"User ID: {member.id}")
+        try:
+            await ch.send(embed=e)
+        except Exception as ex:
+            logger.error("[%s] Failed to post coins log: %s", guild.id, ex)
+
+    # ── Setup join-to-create VCs ───────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -148,14 +183,12 @@ class CoinsCog(commands.Cog, name="Coins"):
             await self._update_coins_channel(guild)
 
     async def _setup_join_to_create(self, guild: discord.Guild):
-        """Create join-to-create VCs in each game category if they don't exist."""
         for keyword in GAME_CATEGORIES:
             category = _find_category(guild, keyword)
             if not category:
                 logger.warning("[%s] Category containing '%s' not found", guild.id, keyword)
                 continue
 
-            # Check and create public join VC
             pub = discord.utils.get(category.voice_channels, name=JOIN_PUBLIC_NAME)
             if not pub:
                 try:
@@ -171,7 +204,6 @@ class CoinsCog(commands.Cog, name="Coins"):
                 except discord.Forbidden:
                     pass
 
-            # Check and create private join VC
             prv = discord.utils.get(category.voice_channels, name=JOIN_PRIVATE_NAME)
             if not prv:
                 try:
@@ -187,7 +219,7 @@ class CoinsCog(commands.Cog, name="Coins"):
                 except discord.Forbidden:
                     pass
 
-    # ── Voice state — handle join-to-create ───────────────────────────────────
+    # ── Voice state — handle join-to-create + instant auto-delete ─────────────
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member,
@@ -202,18 +234,22 @@ class CoinsCog(commands.Cog, name="Coins"):
         if after.channel and after.channel.name in [JOIN_PUBLIC_NAME, JOIN_PRIVATE_NAME]:
             is_private = after.channel.name == JOIN_PRIVATE_NAME
             await self._handle_join_to_create(member, after.channel, is_private)
+            return
 
-        # Check if a managed VC is now empty — delete it
+        # Bug fix 2 & 4: instant delete when VC is empty (no timer/delay)
         if before.channel and before.channel.id in self._managed_vcs:
-            await asyncio.sleep(3)  # Small delay to avoid false positives
             vc = guild.get_channel(before.channel.id)
-            if vc and len(vc.members) == 0:
+            if vc is not None and len(vc.members) == 0:
                 try:
                     await vc.delete(reason="Auto-delete: VC is empty")
                     self._managed_vcs.pop(before.channel.id, None)
-                    logger.info("[%s] Deleted empty VC: %s", guild.id, vc.name)
-                except Exception:
-                    pass
+                    logger.info("[%s] Instantly deleted empty VC: %s", guild.id, vc.name)
+                except Exception as ex:
+                    logger.warning("[%s] Failed to delete VC: %s", guild.id, ex)
+            elif vc is None:
+                self._managed_vcs.pop(before.channel.id, None)
+
+    # ── Handle join-to-create ──────────────────────────────────────────────────
 
     async def _handle_join_to_create(self, member: discord.Member,
                                       trigger_channel: discord.VoiceChannel,
@@ -227,41 +263,38 @@ class CoinsCog(commands.Cog, name="Coins"):
         if is_private and not self._is_admin(member):
             coin_data = await db.get_coins(gid, uid)
             if coin_data["coins"] < PRIVATE_VC_COST:
+                # Bug fix 1: disconnect member immediately
                 try:
-                    await member.move_to(None)  # Kick from trigger VC
+                    await member.move_to(None)
                 except Exception:
                     pass
 
-                # Try DM first
-                dm_sent = False
+                needed = PRIVATE_VC_COST - coin_data["coins"]
+                msg    = (
+                    f"❌ **Not enough Cheese Coins!**\n\n"
+                    f"To create a **Private VC** you need **{PRIVATE_VC_COST} {COIN_EMOJI} Cheese Coins**.\n"
+                    f"You currently have **{coin_data['coins']} {COIN_EMOJI}**.\n"
+                    f"You need **{needed} more {COIN_EMOJI}** to create one!\n\n"
+                    f"💡 Earn coins by spending **30 mins** in any Voice Channel — **30 mins = 1 🧀**"
+                )
+
+                # Send DM once only
                 try:
                     dm = await member.create_dm()
-                    await dm.send(
-                        f"❌ **Not enough Cheese Coins!**\n\n"
-                        f"To create a **Private VC** you need **{PRIVATE_VC_COST} {COIN_EMOJI} Cheese Coins**.\n"
-                        f"You currently have **{coin_data['coins']} {COIN_EMOJI}**.\n"
-                        f"You need **{PRIVATE_VC_COST - coin_data['coins']} more {COIN_EMOJI}** to create one!\n\n"
-                        f"💡 Earn coins by spending time in Voice Channels — **30 mins = 1 🧀**"
-                    )
-                    dm_sent = True
+                    await dm.send(msg)
                 except Exception:
                     pass
 
-                # If DM failed, post in cheese-coins channel
-                if not dm_sent:
-                    coins_ch = discord.utils.get(guild.text_channels, name=COINS_CHANNEL)
-                    if coins_ch:
-                        try:
-                            await coins_ch.send(
-                                f"{member.mention} ❌ **Not enough Cheese Coins!**\n"
-                                f"You need **{PRIVATE_VC_COST} {COIN_EMOJI}** to create a Private VC "
-                                f"but you only have **{coin_data['coins']} {COIN_EMOJI}**.\n"
-                                f"You need **{PRIVATE_VC_COST - coin_data['coins']} more {COIN_EMOJI}**! "
-                                f"Spend 30 mins in VC to earn a coin.",
-                                delete_after=15,
-                            )
-                        except Exception:
-                            pass
+                # Always log in cheese-logs
+                await self._post_coins_log(
+                    guild, member,
+                    "❌ Private VC Denied — Not Enough Coins",
+                    f"{member.mention} tried to create a **Private VC** but doesn't have enough coins!\n\n"
+                    f"**Required:** {PRIVATE_VC_COST} {COIN_EMOJI}\n"
+                    f"**Balance:** {coin_data['coins']} {COIN_EMOJI}\n"
+                    f"**Still needs:** {needed} {COIN_EMOJI}",
+                    color=0xED4245,
+                )
                 return
 
             # Deduct coins
@@ -269,10 +302,10 @@ class CoinsCog(commands.Cog, name="Coins"):
 
         # Get category prefix for naming
         cat_upper = category.name.upper() if category else ""
-        prefix    = next((v for k, v in CATEGORY_PREFIX.items() if k in cat_upper), "")
+        prefix    = next((v for k, v in CATEGORY_PREFIX.items() if k in cat_upper), "VC")
 
         if is_private:
-            vc_name = "🔒 Private VC"
+            vc_name    = "🔒 Private VC"
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(
                     view_channel=False, connect=False
@@ -284,14 +317,12 @@ class CoinsCog(commands.Cog, name="Coins"):
                     view_channel=True, connect=True, manage_channels=True
                 ),
             }
-            # Give admins access
             for role in guild.roles:
                 if role.permissions.administrator:
                     overwrites[role] = discord.PermissionOverwrite(
                         view_channel=True, connect=True, move_members=True
                     )
         else:
-            # Find next available public VC number
             existing = [
                 vc.name for vc in (category.voice_channels if category else guild.voice_channels)
                 if vc.name.startswith(f"{prefix} Public Voice")
@@ -310,44 +341,79 @@ class CoinsCog(commands.Cog, name="Coins"):
             }
 
         try:
+            # Bug fix 3: create VC with Singapore region
             new_vc = await guild.create_voice_channel(
-                vc_name, category=category, overwrites=overwrites
+                vc_name,
+                category=category,
+                overwrites=overwrites,
+                rtc_region="singapore",
             )
             self._managed_vcs[new_vc.id] = {
                 "type":       "private" if is_private else "public",
                 "creator_id": uid,
             }
+
+            # Bug fix 1: move member to the new VC
             await member.move_to(new_vc)
-            logger.info("[%s] Created %s VC '%s' for %s", guild.id,
-                        "private" if is_private else "public", vc_name, member.display_name)
+            logger.info("[%s] Created %s VC '%s' for %s — moved member",
+                        guild.id, "private" if is_private else "public",
+                        vc_name, member.display_name)
 
             if is_private and not self._is_admin(member):
+                coin_data = await db.get_coins(gid, uid)
+
+                # Send DM once
                 try:
                     dm = await member.create_dm()
-                    coin_data = await db.get_coins(gid, uid)
                     await dm.send(
-                        f"✅ Your private VC **{vc_name}** has been created!\n"
-                        f"💰 **{PRIVATE_VC_COST} {COIN_EMOJI}** deducted. Remaining balance: **{coin_data['coins']} {COIN_EMOJI}**\n"
+                        f"✅ **Private VC Created!**\n\n"
+                        f"Your private VC **{vc_name}** is ready!\n"
+                        f"💰 **{PRIVATE_VC_COST} {COIN_EMOJI}** deducted.\n"
+                        f"💼 Remaining balance: **{coin_data['coins']} {COIN_EMOJI}**\n\n"
                         f"The VC will auto-delete when everyone leaves."
                     )
                 except Exception:
                     pass
 
+                # Log to cheese-logs
+                await self._post_coins_log(
+                    guild, member,
+                    "🔒 Private VC Created",
+                    f"{member.mention} created a **Private VC**!\n\n"
+                    f"**VC Name:** {vc_name}\n"
+                    f"**Category:** {category.name if category else 'Unknown'}\n"
+                    f"**Coins Spent:** {PRIVATE_VC_COST} {COIN_EMOJI}\n"
+                    f"**Remaining Balance:** {coin_data['coins']} {COIN_EMOJI}",
+                    color=0x57F287,
+                )
+            else:
+                # Public VC log
+                await self._post_coins_log(
+                    guild, member,
+                    "🔊 Public VC Created",
+                    f"{member.mention} created a **Public VC**!\n\n"
+                    f"**VC Name:** {vc_name}\n"
+                    f"**Category:** {category.name if category else 'Unknown'}",
+                    color=0x5865F2,
+                )
+
         except discord.Forbidden:
             logger.error("[%s] Missing permission to create VC in %s", guild.id,
                          category.name if category else "server")
+        except Exception as ex:
+            logger.error("[%s] Failed to create VC: %s", guild.id, ex)
 
-    # ── Periodic cleanup of empty managed VCs ─────────────────────────────────
+    # ── Periodic cleanup (safety net for any missed deletions) ────────────────
 
     @tasks.loop(minutes=5)
     async def vc_cleanup(self):
         to_delete = []
-        for vc_id, info in self._managed_vcs.items():
+        for vc_id in list(self._managed_vcs.keys()):
             for guild in self.bot.guilds:
                 vc = guild.get_channel(vc_id)
                 if vc and len(vc.members) == 0:
                     try:
-                        await vc.delete(reason="Auto-cleanup: empty VC")
+                        await vc.delete(reason="Cleanup: empty VC")
                         to_delete.append(vc_id)
                     except Exception:
                         pass
@@ -364,7 +430,7 @@ class CoinsCog(commands.Cog, name="Coins"):
 
     @discord.app_commands.command(
         name="coins",
-        description=f"Check your Cheese Coin balance!",
+        description="Check your Cheese Coin balance!",
     )
     async def coins(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -381,18 +447,17 @@ class CoinsCog(commands.Cog, name="Coins"):
             timestamp=datetime.now(timezone.utc),
         )
         e.set_thumbnail(url=interaction.user.display_avatar.url)
-        e.add_field(name=f"{COIN_EMOJI} Balance",     value=f"**{coin_data['coins']}** coins",        inline=True)
-        e.add_field(name="📊 Rank",                    value=rank_suffix(rank) if rank else "Unranked", inline=True)
-        e.add_field(name="💰 Total Earned",            value=f"{coin_data['total_earned']} coins",     inline=True)
-        e.add_field(name="🎙️ How to earn",            value="30 mins in VC = 1 coin",                 inline=True)
-        e.add_field(name="🔒 Private VC Cost",         value=f"{PRIVATE_VC_COST} coins",               inline=True)
+        e.add_field(name=f"{COIN_EMOJI} Balance",    value=f"**{coin_data['coins']}** coins",         inline=True)
+        e.add_field(name="📊 Rank",                   value=rank_suffix(rank) if rank else "Unranked",  inline=True)
+        e.add_field(name="💰 Total Earned",           value=f"{coin_data['total_earned']} coins",      inline=True)
+        e.add_field(name="🎙️ How to earn",           value="30 mins in VC = 1 coin",                  inline=True)
+        e.add_field(name="🔒 Private VC Cost",        value=f"{PRIVATE_VC_COST} coins",                inline=True)
 
-        # Progress to next coin
-        pending  = coin_data["pending_secs"]
-        needed   = 30 * 60
-        pct      = min(int((pending / needed) * 100), 100)
-        filled   = int(pct / 10)
-        bar      = "█" * filled + "░" * (10 - filled)
+        pending   = coin_data["pending_secs"]
+        needed    = 30 * 60
+        pct       = min(int((pending / needed) * 100), 100)
+        filled    = int(pct / 10)
+        bar       = "█" * filled + "░" * (10 - filled)
         mins_left = int((needed - pending) / 60)
         e.add_field(
             name="⏳ Progress to next coin",
@@ -402,7 +467,7 @@ class CoinsCog(commands.Cog, name="Coins"):
         e.set_footer(text=f"{interaction.guild.name} • Keep grinding!")
         await interaction.followup.send(embed=e, ephemeral=True)
 
-    # ── /createvc command (admin/mod only via slash) ───────────────────────────
+    # ── /createvc command (admin/mod only) ─────────────────────────────────────
 
     @discord.app_commands.command(
         name="createvc",
@@ -410,10 +475,10 @@ class CoinsCog(commands.Cog, name="Coins"):
     )
     @discord.app_commands.describe(
         vc_type="Type of VC to create",
-        category_name="Which game category to create it in",
+        category_name="Which game category keyword (e.g. AOE, DOTA, CS, VALORANT)",
     )
     @discord.app_commands.choices(vc_type=[
-        discord.app_commands.Choice(name="Public", value="public"),
+        discord.app_commands.Choice(name="Public",  value="public"),
         discord.app_commands.Choice(name="Private", value="private"),
     ])
     @discord.app_commands.default_permissions(manage_channels=True)
@@ -428,7 +493,7 @@ class CoinsCog(commands.Cog, name="Coins"):
         category = _find_category(interaction.guild, category_name)
         if not category:
             await interaction.followup.send(
-                f"❌ Category `{category_name}` not found!", ephemeral=True
+                f"❌ No category containing `{category_name}` found!", ephemeral=True
             )
             return
 
@@ -473,14 +538,17 @@ class CoinsCog(commands.Cog, name="Coins"):
 
         try:
             new_vc = await interaction.guild.create_voice_channel(
-                vc_name, category=category, overwrites=overwrites
+                vc_name,
+                category=category,
+                overwrites=overwrites,
+                rtc_region="singapore",
             )
             self._managed_vcs[new_vc.id] = {
                 "type":       vc_type,
                 "creator_id": str(interaction.user.id),
             }
             await interaction.followup.send(
-                f"✅ Created **{vc_name}** in `{category.name}`!", ephemeral=True
+                f"✅ Created **{vc_name}** in `{category.name}` (Singapore region)!", ephemeral=True
             )
             logger.info("[%s] Admin %s created %s VC '%s'",
                         interaction.guild.id, interaction.user.display_name, vc_type, vc_name)
