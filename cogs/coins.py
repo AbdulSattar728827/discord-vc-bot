@@ -496,6 +496,18 @@ class CoinsCog(commands.Cog, name="Coins"):
         e.set_footer(text=f"{interaction.guild.name} • Keep grinding!")
         await interaction.followup.send(embed=e, ephemeral=True)
 
+    # ── /refreshcoins command (admin only) ────────────────────────────────────
+
+    @discord.app_commands.command(
+        name="refreshcoins",
+        description="Force-refresh the Cheese Coins leaderboard (admin only).",
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def refreshcoins(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await self._update_coins_channel(interaction.guild)
+        await interaction.followup.send("✅ Cheese Coins leaderboard refreshed!", ephemeral=True)
+
     # ── /createvc command (admin/mod only) ─────────────────────────────────────
 
     @discord.app_commands.command(
