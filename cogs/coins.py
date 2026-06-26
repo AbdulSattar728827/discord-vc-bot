@@ -373,6 +373,10 @@ class CoinsCog(commands.Cog, name="Coins"):
         uid      = str(member.id)
         category = trigger_channel.category
 
+        logger.info("[%s] Handling join-to-create for %s | private=%s | category=%s",
+                    guild.id, member.display_name, is_private,
+                    category.name if category else "None")
+
         # Check coins for private VC (skip for admins/mods)
         if is_private and not self._is_admin(member):
             coin_data = await db.get_coins(gid, uid)
@@ -494,11 +498,15 @@ class CoinsCog(commands.Cog, name="Coins"):
             }
 
         try:
-            # Try creating in category first, fallback to no category
+            # Get fresh category object by ID to avoid stale permission cache
+            fresh_category = None
+            if category:
+                fresh_category = guild.get_channel(category.id)
+
             try:
                 new_vc = await guild.create_voice_channel(
                     vc_name,
-                    category=category,
+                    category=fresh_category,
                     overwrites=overwrites,
                     rtc_region="singapore",
                 )
@@ -510,7 +518,12 @@ class CoinsCog(commands.Cog, name="Coins"):
                     overwrites=overwrites,
                     rtc_region="singapore",
                 )
-            # Force set region
+                # Move to correct category after creation
+                if fresh_category:
+                    try:
+                        await new_vc.edit(category=fresh_category)
+                    except Exception:
+                        pass
             try:
                 await new_vc.edit(rtc_region="singapore")
             except Exception:
