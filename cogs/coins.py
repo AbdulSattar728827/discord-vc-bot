@@ -263,11 +263,20 @@ class CoinsCog(commands.Cog, name="Coins"):
         if is_private and not self._is_admin(member):
             coin_data = await db.get_coins(gid, uid)
             if coin_data["coins"] < PRIVATE_VC_COST:
-                # Bug fix 1: disconnect member immediately
-                try:
-                    await member.move_to(None)
-                except Exception:
-                    pass
+                # Disconnect ALL members from trigger VC (including anyone dragged in)
+                for attempt in range(3):
+                    try:
+                        # Re-fetch channel to get latest members
+                        trigger_vc = guild.get_channel(trigger_channel.id)
+                        if trigger_vc:
+                            for m in trigger_vc.members:
+                                try:
+                                    await m.move_to(None)
+                                except Exception:
+                                    pass
+                        break
+                    except Exception:
+                        await asyncio.sleep(0.5)
 
                 needed = PRIVATE_VC_COST - coin_data["coins"]
                 msg    = (
@@ -311,14 +320,17 @@ class CoinsCog(commands.Cog, name="Coins"):
                     view_channel=False, connect=False
                 ),
                 member: discord.PermissionOverwrite(
-                    view_channel=True, connect=True, move_members=True
+                    view_channel=True, connect=True,
+                    move_members=True, speak=True, stream=True
                 ),
                 guild.me: discord.PermissionOverwrite(
-                    view_channel=True, connect=True, manage_channels=True
+                    view_channel=True, connect=True,
+                    manage_channels=True, move_members=True
                 ),
             }
+            # Give admin roles full access
             for role in guild.roles:
-                if role.permissions.administrator:
+                if role.permissions.administrator or role.permissions.manage_channels:
                     overwrites[role] = discord.PermissionOverwrite(
                         view_channel=True, connect=True, move_members=True
                     )
@@ -341,13 +353,18 @@ class CoinsCog(commands.Cog, name="Coins"):
             }
 
         try:
-            # Bug fix 3: create VC with Singapore region
+            # Singapore region — correct Discord API region string
             new_vc = await guild.create_voice_channel(
                 vc_name,
                 category=category,
                 overwrites=overwrites,
                 rtc_region="singapore",
             )
+            # Force set region via edit in case create didn't apply it
+            try:
+                await new_vc.edit(rtc_region="singapore")
+            except Exception:
+                pass
             self._managed_vcs[new_vc.id] = {
                 "type":       "private" if is_private else "public",
                 "creator_id": uid,
@@ -524,14 +541,16 @@ class CoinsCog(commands.Cog, name="Coins"):
                     view_channel=False, connect=False
                 ),
                 interaction.user: discord.PermissionOverwrite(
-                    view_channel=True, connect=True, move_members=True
+                    view_channel=True, connect=True,
+                    move_members=True, speak=True, stream=True
                 ),
                 interaction.guild.me: discord.PermissionOverwrite(
-                    view_channel=True, connect=True, manage_channels=True
+                    view_channel=True, connect=True,
+                    manage_channels=True, move_members=True
                 ),
             }
             for role in interaction.guild.roles:
-                if role.permissions.administrator:
+                if role.permissions.administrator or role.permissions.manage_channels:
                     overwrites[role] = discord.PermissionOverwrite(
                         view_channel=True, connect=True, move_members=True
                     )
@@ -543,6 +562,11 @@ class CoinsCog(commands.Cog, name="Coins"):
                 overwrites=overwrites,
                 rtc_region="singapore",
             )
+            # Force set region
+            try:
+                await new_vc.edit(rtc_region="singapore")
+            except Exception:
+                pass
             self._managed_vcs[new_vc.id] = {
                 "type":       vc_type,
                 "creator_id": str(interaction.user.id),
