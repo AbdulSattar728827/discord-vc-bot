@@ -320,7 +320,6 @@ class CoinsCog(commands.Cog, name="Coins"):
             if vc is not None and len(vc.members) == 0:
                 try:
                     vc_info = self._managed_vcs.get(before.channel.id, {})
-                    # Remove VC Host role from creator if private VC
                     if vc_info.get("type") == "private":
                         host_id = vc_info.get("host_id")
                         if host_id:
@@ -334,6 +333,22 @@ class CoinsCog(commands.Cog, name="Coins"):
                     logger.warning("[%s] Failed to delete VC: %s", guild.id, ex)
             elif vc is None:
                 self._managed_vcs.pop(before.channel.id, None)
+
+        # If member joined a managed private VC (dragged in) — give them speak permissions
+        if (after.channel and
+            after.channel.id in self._managed_vcs and
+            self._managed_vcs[after.channel.id].get("type") == "private" and
+            after.channel.name not in [JOIN_PUBLIC_NAME, JOIN_PRIVATE_NAME]):
+            try:
+                await after.channel.set_permissions(
+                    member,
+                    view_channel=True, connect=True,
+                    speak=True, stream=True, use_voice_activation=True
+                )
+                logger.info("[%s] Gave speak perms to %s in private VC",
+                            guild.id, member.display_name)
+            except Exception as ex:
+                logger.warning("[%s] Could not set perms for dragged member: %s", guild.id, ex)
 
     # ── Handle join-to-create ──────────────────────────────────────────────────
 
@@ -558,30 +573,48 @@ class CoinsCog(commands.Cog, name="Coins"):
         board     = await db.get_coins_leaderboard(gid)
         rank      = next((i+1 for i,(u,_) in enumerate(board) if u == uid), None)
 
+        # Check if member is currently in VC — add live time to pending
+        member         = interaction.user
+        live_secs      = 0.0
+        currently_in_vc = member.voice is not None and member.voice.channel is not None
+
+        if currently_in_vc:
+            # Get join time from tracker cog
+            tracker = self.bot.get_cog("Tracker")
+            if tracker:
+                sessions = tracker._sessions.get(gid, {})
+                join_time = sessions.get(uid)
+                if join_time:
+                    live_secs = (datetime.now(timezone.utc) - join_time).total_seconds()
+
+        # Calculate total pending including live time
+        total_pending = coin_data["pending_secs"] + live_secs
+        needed        = 30 * 60
+        pct           = min(int((total_pending / needed) * 100), 100)
+        filled        = int(pct / 10)
+        bar           = "█" * filled + "░" * (10 - filled)
+        mins_left     = max(0, int((needed - total_pending) / 60))
+
         e = discord.Embed(
             title=f"{COIN_EMOJI} Your Cheese Coins",
             color=0xFFD700,
             timestamp=datetime.now(timezone.utc),
         )
         e.set_thumbnail(url=interaction.user.display_avatar.url)
-        e.add_field(name=f"{COIN_EMOJI} Balance",    value=f"**{coin_data['coins']}** coins",         inline=True)
-        e.add_field(name="📊 Rank",                   value=rank_suffix(rank) if rank else "Unranked",  inline=True)
-        e.add_field(name="💰 Total Earned",           value=f"{coin_data['total_earned']} coins",      inline=True)
-        e.add_field(name="🎙️ How to earn",           value="30 mins in VC = 1 coin",                  inline=True)
-        e.add_field(name="🔒 Private VC Cost",        value=f"{PRIVATE_VC_COST} coins",                inline=True)
+        e.add_field(name=f"{COIN_EMOJI} Balance",    value=f"**{coin_data['coins']}** coins",        inline=True)
+        e.add_field(name="📊 Rank",                   value=rank_suffix(rank) if rank else "Unranked", inline=True)
+        e.add_field(name="💰 Total Earned",           value=f"{coin_data['total_earned']} coins",     inline=True)
+        e.add_field(name="🎙️ How to earn",           value="30 mins in VC = 1 coin",                 inline=True)
+        e.add_field(name="🔒 Private VC Cost",        value=f"{PRIVATE_VC_COST} coins",               inline=True)
 
-        pending   = coin_data["pending_secs"]
-        needed    = 30 * 60
-        pct       = min(int((pending / needed) * 100), 100)
-        filled    = int(pct / 10)
-        bar       = "█" * filled + "░" * (10 - filled)
-        mins_left = int((needed - pending) / 60)
+        progress_label = "⏳ Progress to next coin (live)" if currently_in_vc else "⏳ Progress to next coin"
+        progress_note  = "\n🟢 You are currently in VC!" if currently_in_vc else "\n⚫ Join a VC to earn coins"
         e.add_field(
-            name="⏳ Progress to next coin",
-            value=f"`{bar}` {pct}%\n{mins_left} min remaining",
+            name=progress_label,
+            value=f"`{bar}` {pct}%\n{mins_left} min remaining{progress_note}",
             inline=False,
         )
-        e.set_footer(text=f"{interaction.guild.name} • Keep grinding!")
+        e.set_footer(text=f"{interaction.guild.name} • Coins are awarded when you leave VC")
         await interaction.followup.send(embed=e, ephemeral=True)
 
     # ── /refreshcoins command (admin only) ────────────────────────────────────
