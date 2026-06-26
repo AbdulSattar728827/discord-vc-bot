@@ -221,6 +221,36 @@ class CoinsCog(commands.Cog, name="Coins"):
         for guild in self.bot.guilds:
             await self._setup_join_to_create(guild)
             await self._update_coins_channel(guild)
+            # Scan for existing managed VCs (bot restarted)
+            await self._scan_existing_vcs(guild)
+
+    async def _scan_existing_vcs(self, guild: discord.Guild):
+        """On startup, find any Private/Public VCs the bot created and track or delete them."""
+        for vc in guild.voice_channels:
+            # Match VCs that look like bot-created ones
+            is_private = vc.name == "🔒 Private VC"
+            is_public  = any(
+                vc.name.startswith(f"{prefix} Public Voice")
+                for prefix in CATEGORY_PREFIX.values()
+            )
+            if not (is_private or is_public):
+                continue
+
+            if len(vc.members) == 0:
+                # Empty — delete immediately
+                try:
+                    await vc.delete(reason="Startup cleanup: empty managed VC")
+                    logger.info("[%s] Startup deleted empty VC: %s", guild.id, vc.name)
+                except Exception as ex:
+                    logger.warning("[%s] Could not delete %s: %s", guild.id, vc.name, ex)
+            else:
+                # Still has members — track it so it gets deleted when empty
+                self._managed_vcs[vc.id] = {
+                    "type":       "private" if is_private else "public",
+                    "creator_id": None,
+                    "host_id":    None,
+                }
+                logger.info("[%s] Tracking existing VC on startup: %s", guild.id, vc.name)
 
     async def _setup_join_to_create(self, guild: discord.Guild):
         for keyword in GAME_CATEGORIES:
@@ -379,18 +409,22 @@ class CoinsCog(commands.Cog, name="Coins"):
                 ),
                 member: discord.PermissionOverwrite(
                     view_channel=True, connect=True,
-                    move_members=True, speak=True, stream=True
+                    speak=True, stream=True, use_voice_activation=True,
+                    move_members=True
                 ),
                 guild.me: discord.PermissionOverwrite(
                     view_channel=True, connect=True,
-                    manage_channels=True, move_members=True
+                    manage_channels=True, move_members=True,
+                    speak=True
                 ),
             }
             # Give admin roles full access
             for role in guild.roles:
                 if role.permissions.administrator or role.permissions.manage_channels:
                     overwrites[role] = discord.PermissionOverwrite(
-                        view_channel=True, connect=True, move_members=True
+                        view_channel=True, connect=True,
+                        speak=True, stream=True,
+                        move_members=True
                     )
         else:
             existing = [
@@ -403,10 +437,12 @@ class CoinsCog(commands.Cog, name="Coins"):
             vc_name    = f"{prefix} Public Voice {num}"
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(
-                    view_channel=True, connect=True
+                    view_channel=True, connect=True,
+                    speak=True, stream=True, use_voice_activation=True
                 ),
                 guild.me: discord.PermissionOverwrite(
-                    view_channel=True, connect=True, manage_channels=True
+                    view_channel=True, connect=True,
+                    manage_channels=True, move_members=True
                 ),
             }
 
@@ -604,10 +640,12 @@ class CoinsCog(commands.Cog, name="Coins"):
             vc_name    = f"{prefix} Public Voice {num}"
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(
-                    view_channel=True, connect=True
+                    view_channel=True, connect=True,
+                    speak=True, stream=True, use_voice_activation=True
                 ),
                 interaction.guild.me: discord.PermissionOverwrite(
-                    view_channel=True, connect=True, manage_channels=True
+                    view_channel=True, connect=True,
+                    manage_channels=True, move_members=True
                 ),
             }
         else:
@@ -618,17 +656,19 @@ class CoinsCog(commands.Cog, name="Coins"):
                 ),
                 interaction.user: discord.PermissionOverwrite(
                     view_channel=True, connect=True,
-                    move_members=True, speak=True, stream=True
+                    speak=True, stream=True, use_voice_activation=True,
+                    move_members=True
                 ),
                 interaction.guild.me: discord.PermissionOverwrite(
                     view_channel=True, connect=True,
-                    manage_channels=True, move_members=True
+                    manage_channels=True, move_members=True, speak=True
                 ),
             }
             for role in interaction.guild.roles:
                 if role.permissions.administrator or role.permissions.manage_channels:
                     overwrites[role] = discord.PermissionOverwrite(
-                        view_channel=True, connect=True, move_members=True
+                        view_channel=True, connect=True,
+                        speak=True, stream=True, move_members=True
                     )
 
         try:
