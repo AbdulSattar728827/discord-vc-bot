@@ -50,6 +50,8 @@ class CoinsCog(commands.Cog, name="Coins"):
         self.bot = bot
         # {vc_id: {"type": "public"/"private", "creator_id": uid}}
         self._managed_vcs: dict[int, dict] = {}
+        # Per-member lock to prevent duplicate processing
+        self._processing: set[str] = set()
         self.coins_refresh.start()
         self.vc_cleanup.start()
 
@@ -232,8 +234,16 @@ class CoinsCog(commands.Cog, name="Coins"):
 
         # Member joined a join-to-create channel
         if after.channel and after.channel.name in [JOIN_PUBLIC_NAME, JOIN_PRIVATE_NAME]:
-            is_private = after.channel.name == JOIN_PRIVATE_NAME
-            await self._handle_join_to_create(member, after.channel, is_private)
+            # Prevent duplicate processing for same member
+            key = f"{guild.id}:{member.id}"
+            if key in self._processing:
+                return
+            self._processing.add(key)
+            try:
+                is_private = after.channel.name == JOIN_PRIVATE_NAME
+                await self._handle_join_to_create(member, after.channel, is_private)
+            finally:
+                self._processing.discard(key)
             return
 
         # Bug fix 2 & 4: instant delete when VC is empty (no timer/delay)
@@ -266,17 +276,19 @@ class CoinsCog(commands.Cog, name="Coins"):
                 # Disconnect ALL members from trigger VC (including anyone dragged in)
                 for attempt in range(3):
                     try:
-                        # Re-fetch channel to get latest members
                         trigger_vc = guild.get_channel(trigger_channel.id)
                         if trigger_vc:
-                            for m in trigger_vc.members:
+                            for m in list(trigger_vc.members):
                                 try:
-                                    await m.move_to(None)
+                                    await m.edit(voice_channel=None)
                                 except Exception:
-                                    pass
+                                    try:
+                                        await m.move_to(None)
+                                    except Exception:
+                                        pass
                         break
                     except Exception:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.3)
 
                 needed = PRIVATE_VC_COST - coin_data["coins"]
                 msg    = (
