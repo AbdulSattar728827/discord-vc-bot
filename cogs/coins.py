@@ -23,7 +23,7 @@ PRIVATE_VC_COST  = 5
 JOIN_PUBLIC_NAME = "➕ Join To Create Public VC"
 JOIN_PRIVATE_NAME= "➕ Join To Create Private VC"
 
-# Game categories where join-to-create VCs will be placed
+# Game categories — bot will find categories CONTAINING these keywords
 GAME_CATEGORIES  = ["AGE OF EMPIRES IV", "DOTA 2", "COUNTER STRIKE", "VALORANT"]
 
 # Category prefix for public VC names
@@ -33,6 +33,13 @@ CATEGORY_PREFIX  = {
     "COUNTER STRIKE":    "CS",
     "VALORANT":          "VAL",
 }
+
+def _find_category(guild: discord.Guild, keyword: str):
+    """Find a category that CONTAINS the keyword (case insensitive)."""
+    return discord.utils.find(
+        lambda c: keyword.upper() in c.name.upper(),
+        guild.categories
+    )
 
 def rank_suffix(n: int) -> str:
     if 11 <= (n % 100) <= 13: return f"{n}th"
@@ -65,6 +72,7 @@ class CoinsCog(commands.Cog, name="Coins"):
     # ── Coins leaderboard channel ──────────────────────────────────────────────
 
     async def _get_or_create_coins_channel(self, guild: discord.Guild):
+        # Search for channel containing the name to handle any duplicates
         ch = discord.utils.get(guild.text_channels, name=COINS_CHANNEL)
         if ch:
             return ch
@@ -141,12 +149,10 @@ class CoinsCog(commands.Cog, name="Coins"):
 
     async def _setup_join_to_create(self, guild: discord.Guild):
         """Create join-to-create VCs in each game category if they don't exist."""
-        for cat_name in GAME_CATEGORIES:
-            category = discord.utils.find(
-                lambda c: c.name.upper() == cat_name.upper(),
-                guild.categories
-            )
+        for keyword in GAME_CATEGORIES:
+            category = _find_category(guild, keyword)
             if not category:
+                logger.warning("[%s] Category containing '%s' not found", guild.id, keyword)
                 continue
 
             # Check and create public join VC
@@ -161,7 +167,7 @@ class CoinsCog(commands.Cog, name="Coins"):
                             )
                         }
                     )
-                    logger.info("[%s] Created '%s' in %s", guild.id, JOIN_PUBLIC_NAME, cat_name)
+                    logger.info("[%s] Created '%s' in %s", guild.id, JOIN_PUBLIC_NAME, category.name)
                 except discord.Forbidden:
                     pass
 
@@ -177,7 +183,7 @@ class CoinsCog(commands.Cog, name="Coins"):
                             )
                         }
                     )
-                    logger.info("[%s] Created '%s' in %s", guild.id, JOIN_PRIVATE_NAME, cat_name)
+                    logger.info("[%s] Created '%s' in %s", guild.id, JOIN_PRIVATE_NAME, category.name)
                 except discord.Forbidden:
                     pass
 
@@ -419,10 +425,7 @@ class CoinsCog(commands.Cog, name="Coins"):
     ):
         await interaction.response.defer(ephemeral=True)
 
-        category = discord.utils.find(
-            lambda c: c.name.upper() == category_name.upper(),
-            interaction.guild.categories
-        )
+        category = _find_category(interaction.guild, category_name)
         if not category:
             await interaction.followup.send(
                 f"❌ Category `{category_name}` not found!", ephemeral=True
