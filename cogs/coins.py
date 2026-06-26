@@ -310,14 +310,24 @@ class CoinsCog(commands.Cog, name="Coins"):
             try:
                 # Small delay to ensure member is fully connected
                 await asyncio.sleep(1)
-                # Verify member is still in the trigger channel
+                # Verify member is still in the trigger channel — use live voice state,
+                # NOT after.channel, which may be a stale cached object from a previous
+                # startup scan pointing at the wrong category.
                 member_obj = guild.get_member(member.id)
                 if not member_obj or not member_obj.voice or not member_obj.voice.channel:
                     return
-                if member_obj.voice.channel.name not in [JOIN_PUBLIC_NAME, JOIN_PRIVATE_NAME]:
+                live_channel = member_obj.voice.channel
+                if live_channel.name not in [JOIN_PUBLIC_NAME, JOIN_PRIVATE_NAME]:
                     return
-                is_private = after.channel.name == JOIN_PRIVATE_NAME
-                await self._handle_join_to_create(member, after.channel, is_private)
+                # Fetch the trigger channel fresh from the API so its .category is correct.
+                # The gateway cache can associate the wrong category after a restart.
+                try:
+                    live_channel = await guild.fetch_channel(live_channel.id)
+                except Exception as fetch_err:
+                    logger.warning("[%s] fetch_channel for trigger failed: %s — using cached",
+                                   guild.id, fetch_err)
+                is_private = live_channel.name == JOIN_PRIVATE_NAME
+                await self._handle_join_to_create(member, live_channel, is_private)
             finally:
                 self._processing.discard(key)
             return
