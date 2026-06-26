@@ -1,5 +1,5 @@
 """
-cogs/leaderboard.py — leaderboard using PostgreSQL
+cogs/leaderboard.py — leaderboard with streaks
 """
 
 import discord
@@ -27,6 +27,13 @@ def fmt(seconds: float) -> str:
 def rank_suffix(n: int) -> str:
     if 11 <= (n % 100) <= 13: return f"{n}th"
     return {1:f"{n}st",2:f"{n}nd",3:f"{n}rd"}.get(n%10, f"{n}th")
+
+def streak_display(streak: int) -> str:
+    if streak <= 0:  return ""
+    if streak >= 30: return f" 🔥🔥🔥{streak}d"
+    if streak >= 7:  return f" 🔥🔥{streak}d"
+    if streak >= 1:  return f" 🔥{streak}d"
+    return ""
 
 
 class LeaderboardCog(commands.Cog, name="Leaderboard"):
@@ -57,8 +64,6 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
     async def _before(self):
         await self.bot.wait_until_ready()
 
-    # Leaderboard only refreshes on timer — no instant refresh on VC events
-
     async def _get_or_create_channel(self, guild):
         ch = discord.utils.get(guild.text_channels, name=LEADERBOARD_CHANNEL_NAME)
         if ch:
@@ -76,7 +81,7 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
         return ch
 
     async def _build_embeds(self, guild) -> list[discord.Embed]:
-        board = await db.get_leaderboard(str(guild.id))
+        board = await db.get_leaderboard_with_streaks(str(guild.id))
         now   = datetime.now(timezone.utc)
 
         if not board:
@@ -90,7 +95,8 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
 
         embeds = []
 
-        for i, (uid, secs) in enumerate(board[:3]):
+        # Top-3 cards
+        for i, (uid, secs, streak) in enumerate(board[:3]):
             member = guild.get_member(int(uid))
             name   = member.display_name if member else f"Unknown ({uid})"
             avatar = member.display_avatar.url if member else (guild.icon.url if guild.icon else None)
@@ -101,16 +107,20 @@ class LeaderboardCog(commands.Cog, name="Leaderboard"):
             )
             e.add_field(name="⏱️ Total Time", value=fmt(secs),         inline=True)
             e.add_field(name="🏅 Rank",        value=rank_suffix(i+1),  inline=True)
+            if streak > 0:
+                e.add_field(name="🔥 Streak", value=f"{streak} day(s)", inline=True)
             if avatar:
                 e.set_thumbnail(url=avatar)
             embeds.append(e)
 
+        # Full list with streaks
         rows = []
-        for i, (uid, secs) in enumerate(board):
+        for i, (uid, secs, streak) in enumerate(board):
             member = guild.get_member(int(uid))
             name   = member.display_name if member else f"Unknown ({uid})"
             medal  = MEDAL[i] if i < 3 else "▫️"
-            rows.append(f"`{rank_suffix(i+1):>5}`  {medal}  **{name}**  —  {fmt(secs)}")
+            s_tag  = streak_display(streak)
+            rows.append(f"`{rank_suffix(i+1):>5}`  {medal}  **{name}**{s_tag}  —  {fmt(secs)}")
 
         for ci in range(0, len(rows), 20):
             sl = rows[ci:ci+20]

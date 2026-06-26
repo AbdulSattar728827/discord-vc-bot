@@ -1,5 +1,5 @@
 """
-cogs/tracker.py — VC time tracker with milestones
+cogs/tracker.py — VC time tracker with milestones and streaks
 """
 
 import discord
@@ -10,7 +10,6 @@ from database import db
 
 logger = logging.getLogger(__name__)
 
-# ── Milestone definitions ──────────────────────────────────────────────────────
 MILESTONES = [
     (1,    "VC Newcomer",   "🥉", "Welcome to the grind!"),
     (5,    "VC Regular",    "🥈", "Getting serious!"),
@@ -22,7 +21,6 @@ MILESTONES = [
     (500,  "VC Immortal",   "⚡", "You are immortal!"),
     (1000, "VC GOD",        "🌟", "You are a VC GOD!"),
 ]
-MILESTONE_HOURS = [m[0] for m in MILESTONES]
 
 MILESTONES_CHANNEL = "🎉vc-milestones"
 
@@ -38,14 +36,18 @@ def rank_suffix(n: int) -> str:
     if 11 <= (n % 100) <= 13: return f"{n}th"
     return {1:f"{n}st",2:f"{n}nd",3:f"{n}rd"}.get(n%10, f"{n}th")
 
+def streak_emoji(streak: int) -> str:
+    if streak <= 0:   return ""
+    if streak >= 30:  return f"🔥🔥🔥 {streak}d"
+    if streak >= 7:   return f"🔥🔥 {streak}d"
+    return f"🔥 {streak}d"
+
 
 class TrackerCog(commands.Cog, name="Tracker"):
 
     def __init__(self, bot):
         self.bot = bot
         self._sessions: dict[str, dict[str, datetime]] = {}
-
-    # ── On startup: record anyone already in VC ────────────────────────────────
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -61,14 +63,12 @@ class TrackerCog(commands.Cog, name="Tracker"):
                     logger.info("[%s] Found %s already in #%s on startup",
                                 gid, member.display_name, vc.name)
 
-    # ── Leaderboard data accessor ──────────────────────────────────────────────
-
-    async def get_leaderboard(self, guild_id: str) -> list[tuple[str, float]]:
+    async def get_leaderboard(self, guild_id: str):
         return await db.get_leaderboard(guild_id)
 
     # ── Milestones channel ─────────────────────────────────────────────────────
 
-    async def _get_or_create_milestones_channel(self, guild: discord.Guild):
+    async def _get_or_create_milestones_channel(self, guild):
         ch = discord.utils.get(guild.text_channels, name=MILESTONES_CHANNEL)
         if ch:
             return ch
@@ -82,9 +82,8 @@ class TrackerCog(commands.Cog, name="Tracker"):
                 ),
             }
             ch = await guild.create_text_channel(
-                MILESTONES_CHANNEL,
-                overwrites=overwrites,
-                topic="🎉 VC Milestone Achievements — celebrate your fellow members!",
+                MILESTONES_CHANNEL, overwrites=overwrites,
+                topic="🎉 VC Milestone Achievements!",
             )
             logger.info("[%s] Created #%s", guild.id, MILESTONES_CHANNEL)
         except discord.Forbidden:
@@ -95,21 +94,16 @@ class TrackerCog(commands.Cog, name="Tracker"):
         total_hours = total_secs / 3600
         gid = str(guild.id)
         uid = str(member.id)
-
-        # Get already achieved milestones
         achieved = await db.get_achieved_milestones(gid, uid)
 
         for hours, title, emoji, message in MILESTONES:
             if hours in achieved:
-                continue  # Already posted this milestone
+                continue
             if total_hours >= hours:
-                # New milestone reached!
                 await db.save_milestone(gid, uid, hours)
-
                 ch = await self._get_or_create_milestones_channel(guild)
                 if not ch:
                     continue
-
                 e = discord.Embed(
                     title=f"{emoji} Milestone Unlocked!",
                     description=(
@@ -122,17 +116,14 @@ class TrackerCog(commands.Cog, name="Tracker"):
                 )
                 e.set_thumbnail(url=member.display_avatar.url)
                 e.set_footer(text=f"Total VC Time: {fmt(total_secs)}")
-
                 try:
                     await ch.send(embed=e)
-                    logger.info("[%s] Milestone posted for %s: %dh (%s)",
-                                guild.id, member.display_name, hours, title)
                 except Exception as ex:
                     logger.error("[%s] Failed to post milestone: %s", guild.id, ex)
 
     # ── Admin logs channel ─────────────────────────────────────────────────────
 
-    async def _get_or_create_logs_channel(self, guild: discord.Guild):
+    async def _get_or_create_logs_channel(self, guild):
         ch = discord.utils.get(guild.text_channels, name="🔒vc-logs")
         if ch:
             return ch
@@ -146,13 +137,12 @@ class TrackerCog(commands.Cog, name="Tracker"):
                 overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
             ch = await guild.create_text_channel("🔒vc-logs", overwrites=overwrites,
                                                   topic="🔒 Admin-only VC session logs")
-            logger.info("[%s] Created #🔒vc-logs", guild.id)
         except discord.Forbidden:
             return None
         return ch
 
     async def _post_log_embed(self, guild, member, channel_name,
-                               join_time, leave_time, duration, rank):
+                               join_time, leave_time, duration, rank, streak):
         ch = await self._get_or_create_logs_channel(guild)
         if not ch:
             return
@@ -166,6 +156,8 @@ class TrackerCog(commands.Cog, name="Tracker"):
         e.add_field(name="🕐 Left",          value=f"<t:{int(leave_time.timestamp())}:T>", inline=True)
         e.add_field(name="⏱️ Session",       value=fmt(duration),                          inline=True)
         e.add_field(name="📊 Total VC Time", value=fmt(total),                             inline=True)
+        if streak > 0:
+            e.add_field(name="🔥 Streak",    value=f"{streak} day(s)",                     inline=True)
         e.set_footer(text=f"User ID: {member.id}")
         try:
             await ch.send(embed=e)
@@ -175,9 +167,7 @@ class TrackerCog(commands.Cog, name="Tracker"):
     # ── Voice state ────────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member,
-                                     before: discord.VoiceState,
-                                     after:  discord.VoiceState):
+    async def on_voice_state_update(self, member, before, after):
         if member.bot:
             return
 
@@ -196,30 +186,29 @@ class TrackerCog(commands.Cog, name="Tracker"):
             self._sessions.setdefault(gid, {})[uid] = now
             logger.info("[%s] %s joined #%s", gid, member.display_name,
                         after.channel.name if after.channel else "?")
-
         elif left:
             await self._finalise(gid, uid, member, before.channel, now)
-
-        # Leaderboard refreshes every 30 minutes automatically
 
     async def _finalise(self, gid, uid, member, channel, leave_time):
         join_time = self._sessions.get(gid, {}).pop(uid, None)
         if join_time is None:
-            logger.warning("[%s] %s left but had no join time recorded",
-                           gid, member.display_name)
             return
 
         duration = (leave_time - join_time).total_seconds()
         if duration < 1:
             return
 
-        # Save to database
+        # Save time
         await db.add_time(gid, uid, duration)
 
-        # Get updated total and rank
+        # Get rank
         board = await db.get_leaderboard(gid)
         rank  = next((i+1 for i,(u,_) in enumerate(board) if u == uid), len(board))
         total = await db.get_total(gid, uid)
+
+        # Update streak
+        streak_data = await db.update_streak(gid, uid, duration)
+        current_streak = streak_data["current_streak"]
 
         # Save log
         await db.add_log(
@@ -230,18 +219,19 @@ class TrackerCog(commands.Cog, name="Tracker"):
             rank_suffix(rank), fmt(total)
         )
 
-        logger.info("[%s] %s left #%s | session %s | total %s | rank %s",
+        logger.info("[%s] %s left #%s | session %s | total %s | rank %s | streak %sd",
                     gid, member.display_name,
                     channel.name if channel else "?",
-                    fmt(duration), fmt(total), rank_suffix(rank))
+                    fmt(duration), fmt(total), rank_suffix(rank), current_streak)
 
         # Check milestones
         await self._check_and_post_milestones(member.guild, member, total)
 
+        # Post log
         await self._post_log_embed(
             member.guild, member,
             channel.name if channel else "Unknown",
-            join_time, leave_time, duration, rank,
+            join_time, leave_time, duration, rank, current_streak,
         )
 
 

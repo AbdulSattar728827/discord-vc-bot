@@ -5,7 +5,7 @@ database.py — PostgreSQL connection and all data operations
 import asyncpg
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,17 @@ class Database:
                     PRIMARY KEY (guild_id, user_id, milestone)
                 )
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS vc_streaks (
+                    guild_id        TEXT NOT NULL,
+                    user_id         TEXT NOT NULL,
+                    current_streak  INTEGER NOT NULL DEFAULT 0,
+                    longest_streak  INTEGER NOT NULL DEFAULT 0,
+                    last_active_day DATE,
+                    daily_secs      DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
 
     # ── Stats ──────────────────────────────────────────────────────────────────
 
@@ -96,10 +107,17 @@ class Database:
             """, guild_id, user_id, username, channel,
                 joined_at, left_at, duration_s, duration, rank, total_time)
 
+    async def get_session_count(self, guild_id: str, user_id: str) -> int:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) as cnt FROM vc_logs WHERE guild_id=$1 AND user_id=$2",
+                guild_id, user_id
+            )
+            return row["cnt"] if row else 0
+
     # ── Milestones ─────────────────────────────────────────────────────────────
 
     async def get_achieved_milestones(self, guild_id: str, user_id: str) -> list[int]:
-        """Returns list of milestone hours already achieved by this user."""
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT milestone FROM vc_milestones WHERE guild_id=$1 AND user_id=$2",
@@ -108,7 +126,6 @@ class Database:
             return [r["milestone"] for r in rows]
 
     async def save_milestone(self, guild_id: str, user_id: str, milestone: int):
-        """Mark a milestone as achieved — ignores if already exists."""
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO vc_milestones (guild_id, user_id, milestone)
@@ -116,13 +133,136 @@ class Database:
                 ON CONFLICT DO NOTHING
             """, guild_id, user_id, milestone)
 
-    async def get_session_count(self, guild_id: str, user_id: str) -> int:
+    # ── Streaks ────────────────────────────────────────────────────────────────
+
+    STREAK_THRESHOLD_SECS = 30 * 60  # 30 minutes to count as a streak day
+
+    async def update_streak(self, guild_id: str, user_id: str, session_secs: float) -> dict:
+        """
+        Update streak for a member after a session.
+        Returns dict with current_streak, longest_streak, streak_updated (bool).
+        """
+        today = datetime.now(timezone.utc).date()
+
         async with self.pool.acquire() as conn:
+            # Get existing streak record
             row = await conn.fetchrow(
-                "SELECT COUNT(*) as cnt FROM vc_logs WHERE guild_id=$1 AND user_id=$2",
+                "SELECT * FROM vc_streaks WHERE guild_id=$1 AND user_id=$2",
                 guild_id, user_id
             )
-            return row["cnt"] if row else 0
+
+            if not row:
+                # First time — create record
+                new_daily = session_secs
+                streak_updated = new_daily >= self.STREAK_THRESHOLD_SECS
+                current_streak = 1 if streak_updated else 0
+                longest_streak = current_streak
+
+                await conn.execute("""
+                    INSERT INTO vc_streaks
+                    (guild_id, user_id, current_streak, longest_streak, last_active_day, daily_secs)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                """, guild_id, user_id, current_streak, longest_streak,
+                    today if streak_updated else None, new_daily)
+
+                return {
+                    "current_streak": current_streak,
+                    "longest_streak": longest_streak,
+                    "streak_updated": streak_updated,
+                }
+
+            last_day    = row["last_active_day"]
+            daily_secs  = row["daily_secs"]
+            curr_streak = row["current_streak"]
+            long_streak = row["longest_streak"]
+
+            # Reset daily_secs if it's a new day
+            if last_day != today:
+                daily_secs = 0.0
+
+            new_daily = daily_secs + session_secs
+
+            # Check if threshold met today
+            was_met_before = daily_secs >= self.STREAK_THRESHOLD_SECS
+            is_met_now     = new_daily >= self.STREAK_THRESHOLD_SECS
+            streak_updated = is_met_now and not was_met_before
+
+            if streak_updated:
+                yesterday = today - timedelta(days=1)
+                if last_day == yesterday or last_day is None:
+                    # Consecutive day — extend streak
+                    curr_streak += 1
+                elif last_day != today:
+                    # Streak broken — reset to 1
+                    curr_streak = 1
+
+                long_streak = max(long_streak, curr_streak)
+                last_day    = today
+
+            await conn.execute("""
+                UPDATE vc_streaks
+                SET current_streak=$3, longest_streak=$4,
+                    last_active_day=$5, daily_secs=$6
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id, curr_streak, long_streak, last_day, new_daily)
+
+            return {
+                "current_streak": curr_streak,
+                "longest_streak": long_streak,
+                "streak_updated": streak_updated,
+            }
+
+    async def get_streak(self, guild_id: str, user_id: str) -> dict:
+        """Get current streak info for a member."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT current_streak, longest_streak, last_active_day FROM vc_streaks WHERE guild_id=$1 AND user_id=$2",
+                guild_id, user_id
+            )
+            if not row:
+                return {"current_streak": 0, "longest_streak": 0}
+
+            # Check if streak is still active (last active was yesterday or today)
+            today     = datetime.now(timezone.utc).date()
+            yesterday = today - timedelta(days=1)
+            last_day  = row["last_active_day"]
+
+            current = row["current_streak"]
+            if last_day and last_day < yesterday:
+                # Streak is broken — they missed a day
+                current = 0
+
+            return {
+                "current_streak": current,
+                "longest_streak": row["longest_streak"],
+            }
+
+    async def get_leaderboard_with_streaks(self, guild_id: str) -> list[tuple[str, float, int]]:
+        """Return leaderboard with streak info: [(user_id, total_secs, current_streak), ...]"""
+        today     = datetime.now(timezone.utc).date()
+        yesterday = today - timedelta(days=1)
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT v.user_id, v.total_secs,
+                       COALESCE(s.current_streak, 0) as current_streak,
+                       s.last_active_day
+                FROM vc_stats v
+                LEFT JOIN vc_streaks s
+                    ON v.guild_id = s.guild_id AND v.user_id = s.user_id
+                WHERE v.guild_id = $1
+                ORDER BY v.total_secs DESC
+            """, guild_id)
+
+            result = []
+            for r in rows:
+                streak = r["current_streak"]
+                last   = r["last_active_day"]
+                # Reset streak if they missed a day
+                if last and last < yesterday:
+                    streak = 0
+                result.append((r["user_id"], r["total_secs"], streak))
+            return result
 
     async def close(self):
         if self.pool:
