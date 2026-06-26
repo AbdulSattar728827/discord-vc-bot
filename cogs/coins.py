@@ -502,32 +502,38 @@ class CoinsCog(commands.Cog, name="Coins"):
             }
 
         try:
-            # Get fresh category object by ID to avoid stale permission cache
+            # Always fetch the category fresh from the API to bypass Discord Community
+            # onboarding permission cache — get_channel() can return a stale object
+            # that inherits onboarding restrictions even for bots with Administrator.
             fresh_category = None
-            if category:
-                fresh_category = guild.get_channel(category.id)
+            if category_id:
+                try:
+                    fresh_category = await guild.fetch_channel(category_id)
+                except Exception as fetch_err:
+                    logger.warning("[%s] fetch_channel(%s) failed: %s — falling back to get_channel",
+                                   guild.id, category_id, fetch_err)
+                    fresh_category = guild.get_channel(category_id)
 
-            try:
-                new_vc = await guild.create_voice_channel(
-                    vc_name,
-                    category=fresh_category,
-                    overwrites=overwrites,
-                    rtc_region="singapore",
+            # Build explicit overwrites so Discord cannot inherit onboarding restrictions
+            # onto the newly created channel.  We always set view_channel + connect on
+            # @everyone explicitly; this prevents the Community server from treating the
+            # new channel as "hidden" and blocking the creation call.
+            if guild.default_role not in overwrites:
+                overwrites[guild.default_role] = discord.PermissionOverwrite(
+                    view_channel=True, connect=True
                 )
-            except discord.Forbidden:
-                logger.warning("[%s] Cannot create in category %s, trying without category",
-                               guild.id, category.name if category else "None")
-                new_vc = await guild.create_voice_channel(
-                    vc_name,
-                    overwrites=overwrites,
-                    rtc_region="singapore",
+            if guild.me not in overwrites:
+                overwrites[guild.me] = discord.PermissionOverwrite(
+                    view_channel=True, connect=True,
+                    manage_channels=True, move_members=True
                 )
-                # Move to correct category after creation
-                if fresh_category:
-                    try:
-                        await new_vc.edit(category=fresh_category)
-                    except Exception:
-                        pass
+
+            new_vc = await guild.create_voice_channel(
+                vc_name,
+                category=fresh_category,
+                overwrites=overwrites,
+                rtc_region="singapore",
+            )
             try:
                 await new_vc.edit(rtc_region="singapore")
             except Exception:
