@@ -653,9 +653,39 @@ class CoinsCog(commands.Cog, name="Coins"):
     # ── /refreshcoins command (admin only) ────────────────────────────────────
 
     @discord.app_commands.command(
-        name="refreshcoins",
-        description="Force-refresh the Cheese Coins leaderboard (admin only).",
+        name="testvc",
+        description="Test if bot can create a VC (admin only).",
     )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def testvc(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        results = []
+
+        # Test 1: Create VC without category
+        try:
+            vc = await guild.create_voice_channel("🧪 Test VC")
+            await vc.delete()
+            results.append("✅ Can create VC without category")
+        except discord.Forbidden as e:
+            results.append(f"❌ Cannot create VC without category: {e}")
+        except Exception as e:
+            results.append(f"❌ Error: {e}")
+
+        # Test 2: Try each game category
+        for keyword in GAME_CATEGORIES:
+            category = _find_category(guild, keyword)
+            if not category:
+                results.append(f"⚠️ Category '{keyword}' not found")
+                continue
+            try:
+                vc = await guild.create_voice_channel("🧪 Test VC", category=category)
+                await vc.delete()
+                results.append(f"✅ Can create in {keyword}")
+            except discord.Forbidden as e:
+                results.append(f"❌ Cannot create in {keyword}: {e}")
+
+        await interaction.followup.send("\n".join(results), ephemeral=True)
     @discord.app_commands.default_permissions(administrator=True)
     async def refreshcoins(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
