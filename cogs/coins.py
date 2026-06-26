@@ -308,6 +308,14 @@ class CoinsCog(commands.Cog, name="Coins"):
                 return
             self._processing.add(key)
             try:
+                # Small delay to ensure member is fully connected
+                await asyncio.sleep(1)
+                # Verify member is still in the trigger channel
+                member_obj = guild.get_member(member.id)
+                if not member_obj or not member_obj.voice or not member_obj.voice.channel:
+                    return
+                if member_obj.voice.channel.name not in [JOIN_PUBLIC_NAME, JOIN_PRIVATE_NAME]:
+                    return
                 is_private = after.channel.name == JOIN_PRIVATE_NAME
                 await self._handle_join_to_create(member, after.channel, is_private)
             finally:
