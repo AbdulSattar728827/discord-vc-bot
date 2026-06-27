@@ -451,6 +451,11 @@ class Database:
                     finished_at TIMESTAMPTZ
                 )
             """)
+            # Migration: add civ_data column if it doesn't exist yet
+            await conn.execute("""
+                ALTER TABLE aoe_matches
+                ADD COLUMN IF NOT EXISTS civ_data JSONB NOT NULL DEFAULT '{}'
+            """)
 
     async def get_aoe_stats(self, guild_id: str, user_id: str, queue_type: str) -> dict:
         async with self.pool.acquire() as conn:
