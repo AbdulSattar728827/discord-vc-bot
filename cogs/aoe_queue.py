@@ -42,7 +42,8 @@ AOE_CATEGORY_KEYWORD  = "AGE OF EMPIRES"
 RESULT_DISPLAY_SECS   = 60
 WIN_COINS             = 5
 
-QUEUE_TIMEOUT_SECS = 1800   # 30 minutes — auto-remove from queue if not filled
+QUEUE_TIMEOUT_SECS  = 1800   # 30 minutes
+AOE_TEAM_VC_NAME    = "AOE IV (Team 1)"  # Permanent VC everyone moves to after match
 
 AOE_CIVS = [
     "Chinese", "Jin Dynasty", "Zhu Xi's Legacy",
@@ -104,6 +105,9 @@ class MatchState:
         # Which captains have locked in
         self.cap1_locked = False
         self.cap2_locked = False
+        # Temp match VCs
+        self.temp_vc1 = None
+        self.temp_vc2 = None
 
     @property
     def civs_revealed(self) -> bool:
@@ -623,6 +627,46 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         match.thread = thread
         return thread
 
+    # ── Temp VC management ────────────────────────────────────────────────────
+
+    async def _create_temp_vcs(self, guild, match):
+        category = find_aoe_category(guild)
+        if not category:
+            return
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, connect=True,
+                                                   manage_channels=True, move_members=True),
+        }
+        try:
+            vc1 = await guild.create_voice_channel(
+                f"Match #{match.match_id} Team 1", category=category, overwrites=overwrites)
+            vc2 = await guild.create_voice_channel(
+                f"Match #{match.match_id} Team 2", category=category, overwrites=overwrites)
+            match.temp_vc1 = vc1
+            match.temp_vc2 = vc2
+            logger.info("[%s] Created temp VCs for match #%s", guild.id, match.match_id)
+        except Exception as ex:
+            logger.error("[%s] Failed to create temp VCs: %s", guild.id, ex)
+
+    async def _cleanup_temp_vcs(self, guild, match):
+        target_vc = discord.utils.get(guild.voice_channels, name=AOE_TEAM_VC_NAME)
+        for temp_vc in [match.temp_vc1, match.temp_vc2]:
+            if not temp_vc:
+                continue
+            if target_vc:
+                for member in list(temp_vc.members):
+                    try:
+                        await member.move_to(target_vc)
+                    except Exception as ex:
+                        logger.warning("[%s] Could not move %s: %s", guild.id, member.display_name, ex)
+            try:
+                await temp_vc.delete(reason=f"Match #{match.match_id} ended")
+            except Exception as ex:
+                logger.warning("[%s] Could not delete temp VC: %s", guild.id, ex)
+        match.temp_vc1 = None
+        match.temp_vc2 = None
+
     # ── Queue embed ────────────────────────────────────────────────────────────
 
     async def _post_queue_embed(self, guild, queue_type: str, channel=None):
@@ -808,17 +852,33 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
     async def _show_civ_select_fresh(self, guild, match: MatchState, thread):
         """Post a fresh civ selection message in the thread (no interaction)."""
         match.phase = "civ_select"
+        await self._create_temp_vcs(guild, match)
         embed = self._build_civ_status_embed(guild, match)
         view  = CivSelectView(self, match)
         msg   = await thread.send(embed=embed, view=view)
         match.thread_message = msg
+        if match.temp_vc1 and match.temp_vc2:
+            await thread.send(
+                f"\U0001f509 Two VCs created for this match!\n"
+                f"**Team 1:** {match.temp_vc1.mention}\n"
+                f"**Team 2:** {match.temp_vc2.mention}\n"
+                f"Everyone moves to **{AOE_TEAM_VC_NAME}** when match ends."
+            )
 
     async def show_civ_select(self, interaction: discord.Interaction, match: MatchState):
         """Edit existing message to civ selection (called from draft)."""
         match.phase = "civ_select"
+        await self._create_temp_vcs(interaction.guild, match)
         embed = self._build_civ_status_embed(interaction.guild, match)
         view  = CivSelectView(self, match)
         await interaction.response.edit_message(embed=embed, view=view)
+        if match.temp_vc1 and match.temp_vc2 and match.thread:
+            await match.thread.send(
+                f"\U0001f509 Two VCs created for this match!\n"
+                f"**Team 1:** {match.temp_vc1.mention}\n"
+                f"**Team 2:** {match.temp_vc2.mention}\n"
+                f"Everyone moves to **{AOE_TEAM_VC_NAME}** when match ends."
+            )
 
     def _build_civ_status_embed(self, guild, match: MatchState) -> discord.Embed:
         e = discord.Embed(
@@ -998,6 +1058,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         if match in self._get_matches(guild.id):
             self._get_matches(guild.id).remove(match)
 
+        await self._cleanup_temp_vcs(guild, match)
         await asyncio.sleep(RESULT_DISPLAY_SECS)
         if match.thread:
             try:
@@ -1029,6 +1090,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         if match in self._get_matches(guild.id):
             self._get_matches(guild.id).remove(match)
 
+        await self._cleanup_temp_vcs(guild, match)
         await asyncio.sleep(RESULT_DISPLAY_SECS)
         if match.thread:
             try:
