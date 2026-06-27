@@ -739,16 +739,14 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             description=f"{winner.mention} **won the flip!**\n\nChoose your pick order:",
             color=0xF1C40F, timestamp=datetime.now(timezone.utc))
         view = FirstPickView(self, match, winner)
-        await interaction.response.defer()
-        await interaction.message.edit(embed=e, view=view)
+        await interaction.response.edit_message(embed=e, view=view)
 
     # ── Draft ──────────────────────────────────────────────────────────────────
 
     async def show_draft(self, interaction: discord.Interaction, match: MatchState):
         embed = await self._build_draft_embed(interaction.guild, match)
         view  = DraftView(self, match)
-        await interaction.response.defer()
-        await interaction.message.edit(embed=embed, view=view)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def _build_draft_embed(self, guild, match: MatchState) -> discord.Embed:
         gid    = str(guild.id)
@@ -786,8 +784,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                           description="Select a player from your team to become the new captain.",
                           color=0x95A5A6)
         view = ChangeCaptainView(self, match, team)
-        await interaction.response.defer()
-        await interaction.message.edit(embed=e, view=view)
+        await interaction.response.edit_message(embed=e, view=view)
 
     # ── Civ Selection ──────────────────────────────────────────────────────────
 
@@ -804,8 +801,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         match.phase = "civ_select"
         embed = self._build_civ_status_embed(interaction.guild, match)
         view  = CivSelectView(self, match)
-        await interaction.response.defer()
-        await interaction.message.edit(embed=embed, view=view)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     def _build_civ_status_embed(self, guild, match: MatchState) -> discord.Embed:
         e = discord.Embed(
@@ -899,14 +895,12 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
     async def show_pre_match(self, interaction: discord.Interaction, match: MatchState):
         embed = await self._build_teams_embed(interaction.guild, match, phase="pre_match")
         view  = PreMatchView(self, match)
-        await interaction.response.defer()
-        await interaction.message.edit(embed=embed, view=view)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def show_in_match(self, interaction: discord.Interaction, match: MatchState):
         embed = await self._build_teams_embed(interaction.guild, match, phase="in_match")
         view  = InMatchView(self, match)
-        await interaction.response.defer()
-        await interaction.message.edit(embed=embed, view=view)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def _build_teams_embed(self, guild, match: MatchState, phase: str = "pre_match") -> discord.Embed:
         gid    = str(guild.id)
@@ -937,7 +931,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
     # ── Resolve / Cancel ───────────────────────────────────────────────────────
 
     async def resolve_match(self, interaction: discord.Interaction, match: MatchState, winner: int):
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=False)
         guild        = interaction.guild
         gid          = str(guild.id)
         qt           = match.queue_type
@@ -980,7 +974,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                     value=f"Winning team each received **{WIN_COINS} 🧀 Cheese Coins!**", inline=False)
         e.set_footer(text=f"Match #{match.match_id} • Thread closes in {RESULT_DISPLAY_SECS}s")
 
-        await interaction.message.edit(embed=e, view=None)
+        await interaction.edit_original_response(embed=e, view=None)
         await self._post_match_history(guild, match, result=f"Team {winner} Victory",
                                         winning_team=winning_team, losing_team=losing_team)
         await self._update_leaderboard(guild, qt)
@@ -995,7 +989,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 pass
 
     async def cancel_match(self, interaction: discord.Interaction, match: MatchState):
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=False)
         guild = interaction.guild
         gid   = str(guild.id)
         qt    = match.queue_type
@@ -1012,7 +1006,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             description=f"This match has been cancelled. No ELO changes.\nThread closes in {RESULT_DISPLAY_SECS}s.",
             color=0x95A5A6, timestamp=datetime.now(timezone.utc))
         e.set_footer(text=f"Match #{match.match_id}")
-        await interaction.message.edit(embed=e, view=None)
+        await interaction.edit_original_response(embed=e, view=None)
 
         await self._post_match_history(guild, match, result="Cancelled", winning_team=[], losing_team=[])
         if match in self._get_matches(guild.id):
