@@ -249,6 +249,7 @@ class DraftView(discord.ui.View):
 
     def _build(self):
         self.clear_items()
+        # Pick buttons on rows 0 and 1
         for i, player in enumerate(self.match.remaining):
             btn = discord.ui.Button(
                 label=player.display_name,
@@ -267,7 +268,17 @@ class DraftView(discord.ui.View):
             btn.callback = callback
             self.add_item(btn)
 
-        cap1_btn = discord.ui.Button(label="🔄 Change Team 1 Captain", style=discord.ButtonStyle.secondary, row=2)
+        # Calculate rows dynamically — must be sequential from 0
+        # If there are no pick buttons, captain buttons go on row 0
+        # If pick buttons used rows 0-1, captain buttons go on row 2
+        n = len(self.match.remaining)
+        cap_row    = min(max((n + 3) // 4, 1), 2)  # 0 if no picks, else 2
+        cancel_row = min(cap_row + 1, 4)
+
+        cap1_btn = discord.ui.Button(
+            label="🔄 Change Team 1 Captain",
+            style=discord.ButtonStyle.secondary,
+            row=cap_row)
         async def change_cap1(interaction: discord.Interaction):
             if interaction.user.id != self.match.captain1.id:
                 await interaction.response.send_message("❌ Only Team 1's captain can do this!", ephemeral=True)
@@ -276,7 +287,10 @@ class DraftView(discord.ui.View):
         cap1_btn.callback = change_cap1
         self.add_item(cap1_btn)
 
-        cap2_btn = discord.ui.Button(label="🔄 Change Team 2 Captain", style=discord.ButtonStyle.secondary, row=2)
+        cap2_btn = discord.ui.Button(
+            label="🔄 Change Team 2 Captain",
+            style=discord.ButtonStyle.secondary,
+            row=cap_row)
         async def change_cap2(interaction: discord.Interaction):
             if interaction.user.id != self.match.captain2.id:
                 await interaction.response.send_message("❌ Only Team 2's captain can do this!", ephemeral=True)
@@ -285,7 +299,10 @@ class DraftView(discord.ui.View):
         cap2_btn.callback = change_cap2
         self.add_item(cap2_btn)
 
-        cancel_btn = discord.ui.Button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger, row=3)
+        cancel_btn = discord.ui.Button(
+            label="🚫 Cancel Match",
+            style=discord.ButtonStyle.danger,
+            row=cancel_row)
         async def cancel(interaction: discord.Interaction):
             if not self.cog._is_captain_or_admin(interaction.user, self.match):
                 await interaction.response.send_message("❌ Not your match!", ephemeral=True)
