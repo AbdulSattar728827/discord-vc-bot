@@ -1049,6 +1049,242 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await interaction.followup.send(embed=e, ephemeral=True)
 
 
+    @discord.app_commands.command(
+        name="aoe_addwin",
+        description="Add a win to a player's AOE stats (admin only).",
+    )
+    @discord.app_commands.describe(
+        member="The player to add a win to",
+        queue_type="Which queue type",
+        amount="Number of wins to add (default 1)",
+    )
+    @discord.app_commands.choices(queue_type=[
+        discord.app_commands.Choice(name="1v1", value="1v1"),
+        discord.app_commands.Choice(name="2v2", value="2v2"),
+        discord.app_commands.Choice(name="3v3", value="3v3"),
+        discord.app_commands.Choice(name="4v4", value="4v4"),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_addwin(self, interaction: discord.Interaction,
+                          member: discord.Member, queue_type: str, amount: int = 1):
+        await interaction.response.defer(ephemeral=True)
+        if amount <= 0:
+            await interaction.followup.send("❌ Amount must be positive!", ephemeral=True)
+            return
+        gid = str(interaction.guild.id)
+        uid = str(member.id)
+        for _ in range(amount):
+            await db.update_aoe_stats(gid, uid, queue_type, "win")
+        stats = await db.get_aoe_stats(gid, uid, queue_type)
+        total = stats["wins"] + stats["losses"]
+        wp    = f"{(stats['wins']/total*100):.1f}%" if total > 0 else "0%"
+        e = discord.Embed(title="✅ AOE Win Added", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Player",     value=member.mention,       inline=True)
+        e.add_field(name="🎮 Queue",      value=queue_type.upper(),   inline=True)
+        e.add_field(name="➕ Added",       value=f"{amount} win(s)",   inline=True)
+        e.add_field(name="🏆 Wins",       value=str(stats["wins"]),   inline=True)
+        e.add_field(name="💔 Losses",     value=str(stats["losses"]), inline=True)
+        e.add_field(name="📊 Win Rate",   value=wp,                   inline=True)
+        e.add_field(name=f"{elo_bar(stats['elo'])} ELO", value=str(stats["elo"]), inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        await self._update_leaderboard(interaction.guild, queue_type)
+        logger.info("[%s] Admin %s added %d win(s) to %s (%s)",
+                    interaction.guild.id, interaction.user.display_name,
+                    amount, member.display_name, queue_type)
+
+    @discord.app_commands.command(
+        name="aoe_removewin",
+        description="Remove a win from a player's AOE stats (admin only).",
+    )
+    @discord.app_commands.describe(
+        member="The player to remove a win from",
+        queue_type="Which queue type",
+        amount="Number of wins to remove (default 1)",
+    )
+    @discord.app_commands.choices(queue_type=[
+        discord.app_commands.Choice(name="1v1", value="1v1"),
+        discord.app_commands.Choice(name="2v2", value="2v2"),
+        discord.app_commands.Choice(name="3v3", value="3v3"),
+        discord.app_commands.Choice(name="4v4", value="4v4"),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_removewin(self, interaction: discord.Interaction,
+                             member: discord.Member, queue_type: str, amount: int = 1):
+        await interaction.response.defer(ephemeral=True)
+        if amount <= 0:
+            await interaction.followup.send("❌ Amount must be positive!", ephemeral=True)
+            return
+        gid   = str(interaction.guild.id)
+        uid   = str(member.id)
+        stats = await db.get_aoe_stats(gid, uid, queue_type)
+        if stats["wins"] == 0:
+            await interaction.followup.send(
+                f"❌ **{member.display_name}** has no wins to remove in {queue_type.upper()}!",
+                ephemeral=True)
+            return
+        remove = min(amount, stats["wins"])
+        await db.adjust_aoe_stats(gid, uid, queue_type, wins_delta=-remove, elo_delta=-(remove * ELO_CHANGE))
+        stats = await db.get_aoe_stats(gid, uid, queue_type)
+        total = stats["wins"] + stats["losses"]
+        wp    = f"{(stats['wins']/total*100):.1f}%" if total > 0 else "0%"
+        e = discord.Embed(title="✅ AOE Win Removed", color=0xED4245,
+                          timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Player",     value=member.mention,        inline=True)
+        e.add_field(name="🎮 Queue",      value=queue_type.upper(),    inline=True)
+        e.add_field(name="➖ Removed",     value=f"{remove} win(s)",    inline=True)
+        e.add_field(name="🏆 Wins",       value=str(stats["wins"]),    inline=True)
+        e.add_field(name="💔 Losses",     value=str(stats["losses"]),  inline=True)
+        e.add_field(name="📊 Win Rate",   value=wp,                    inline=True)
+        e.add_field(name=f"{elo_bar(stats['elo'])} ELO", value=str(stats["elo"]), inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        await self._update_leaderboard(interaction.guild, queue_type)
+        logger.info("[%s] Admin %s removed %d win(s) from %s (%s)",
+                    interaction.guild.id, interaction.user.display_name,
+                    remove, member.display_name, queue_type)
+
+    @discord.app_commands.command(
+        name="aoe_addloss",
+        description="Add a loss to a player's AOE stats (admin only).",
+    )
+    @discord.app_commands.describe(
+        member="The player to add a loss to",
+        queue_type="Which queue type",
+        amount="Number of losses to add (default 1)",
+    )
+    @discord.app_commands.choices(queue_type=[
+        discord.app_commands.Choice(name="1v1", value="1v1"),
+        discord.app_commands.Choice(name="2v2", value="2v2"),
+        discord.app_commands.Choice(name="3v3", value="3v3"),
+        discord.app_commands.Choice(name="4v4", value="4v4"),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_addloss(self, interaction: discord.Interaction,
+                           member: discord.Member, queue_type: str, amount: int = 1):
+        await interaction.response.defer(ephemeral=True)
+        if amount <= 0:
+            await interaction.followup.send("❌ Amount must be positive!", ephemeral=True)
+            return
+        gid = str(interaction.guild.id)
+        uid = str(member.id)
+        for _ in range(amount):
+            await db.update_aoe_stats(gid, uid, queue_type, "loss")
+        stats = await db.get_aoe_stats(gid, uid, queue_type)
+        total = stats["wins"] + stats["losses"]
+        wp    = f"{(stats['wins']/total*100):.1f}%" if total > 0 else "0%"
+        e = discord.Embed(title="✅ AOE Loss Added", color=0xED4245,
+                          timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Player",     value=member.mention,       inline=True)
+        e.add_field(name="🎮 Queue",      value=queue_type.upper(),   inline=True)
+        e.add_field(name="➕ Added",       value=f"{amount} loss(es)", inline=True)
+        e.add_field(name="🏆 Wins",       value=str(stats["wins"]),   inline=True)
+        e.add_field(name="💔 Losses",     value=str(stats["losses"]), inline=True)
+        e.add_field(name="📊 Win Rate",   value=wp,                   inline=True)
+        e.add_field(name=f"{elo_bar(stats['elo'])} ELO", value=str(stats["elo"]), inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        await self._update_leaderboard(interaction.guild, queue_type)
+        logger.info("[%s] Admin %s added %d loss(es) to %s (%s)",
+                    interaction.guild.id, interaction.user.display_name,
+                    amount, member.display_name, queue_type)
+
+    @discord.app_commands.command(
+        name="aoe_removeloss",
+        description="Remove a loss from a player's AOE stats (admin only).",
+    )
+    @discord.app_commands.describe(
+        member="The player to remove a loss from",
+        queue_type="Which queue type",
+        amount="Number of losses to remove (default 1)",
+    )
+    @discord.app_commands.choices(queue_type=[
+        discord.app_commands.Choice(name="1v1", value="1v1"),
+        discord.app_commands.Choice(name="2v2", value="2v2"),
+        discord.app_commands.Choice(name="3v3", value="3v3"),
+        discord.app_commands.Choice(name="4v4", value="4v4"),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_removeloss(self, interaction: discord.Interaction,
+                              member: discord.Member, queue_type: str, amount: int = 1):
+        await interaction.response.defer(ephemeral=True)
+        if amount <= 0:
+            await interaction.followup.send("❌ Amount must be positive!", ephemeral=True)
+            return
+        gid   = str(interaction.guild.id)
+        uid   = str(member.id)
+        stats = await db.get_aoe_stats(gid, uid, queue_type)
+        if stats["losses"] == 0:
+            await interaction.followup.send(
+                f"❌ **{member.display_name}** has no losses to remove in {queue_type.upper()}!",
+                ephemeral=True)
+            return
+        remove = min(amount, stats["losses"])
+        await db.adjust_aoe_stats(gid, uid, queue_type, losses_delta=-remove, elo_delta=(remove * ELO_CHANGE))
+        stats = await db.get_aoe_stats(gid, uid, queue_type)
+        total = stats["wins"] + stats["losses"]
+        wp    = f"{(stats['wins']/total*100):.1f}%" if total > 0 else "0%"
+        e = discord.Embed(title="✅ AOE Loss Removed", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Player",     value=member.mention,        inline=True)
+        e.add_field(name="🎮 Queue",      value=queue_type.upper(),    inline=True)
+        e.add_field(name="➖ Removed",     value=f"{remove} loss(es)",  inline=True)
+        e.add_field(name="🏆 Wins",       value=str(stats["wins"]),    inline=True)
+        e.add_field(name="💔 Losses",     value=str(stats["losses"]),  inline=True)
+        e.add_field(name="📊 Win Rate",   value=wp,                    inline=True)
+        e.add_field(name=f"{elo_bar(stats['elo'])} ELO", value=str(stats["elo"]), inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        await self._update_leaderboard(interaction.guild, queue_type)
+        logger.info("[%s] Admin %s removed %d loss(es) from %s (%s)",
+                    interaction.guild.id, interaction.user.display_name,
+                    remove, member.display_name, queue_type)
+
+    @discord.app_commands.command(
+        name="aoe_resetstats",
+        description="Reset a player's AOE stats for a queue type (admin only).",
+    )
+    @discord.app_commands.describe(
+        member="The player to reset",
+        queue_type="Which queue type to reset",
+    )
+    @discord.app_commands.choices(queue_type=[
+        discord.app_commands.Choice(name="1v1", value="1v1"),
+        discord.app_commands.Choice(name="2v2", value="2v2"),
+        discord.app_commands.Choice(name="3v3", value="3v3"),
+        discord.app_commands.Choice(name="4v4", value="4v4"),
+        discord.app_commands.Choice(name="All queues", value="all"),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_resetstats(self, interaction: discord.Interaction,
+                              member: discord.Member, queue_type: str):
+        await interaction.response.defer(ephemeral=True)
+        gid    = str(interaction.guild.id)
+        uid    = str(member.id)
+        queues = list(QUEUE_CONFIGS.keys()) if queue_type == "all" else [queue_type]
+        for qt in queues:
+            await db.reset_aoe_stats(gid, uid, qt)
+        label = "all queues" if queue_type == "all" else queue_type.upper()
+        e = discord.Embed(title="✅ AOE Stats Reset", color=0xFEE75C,
+                          timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Player", value=member.mention,  inline=True)
+        e.add_field(name="🎮 Queue",  value=label,           inline=True)
+        e.add_field(name="🔄 Reset",  value="W:0 L:0 NR:0 ELO:1000", inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        for qt in queues:
+            await self._update_leaderboard(interaction.guild, qt)
+        logger.info("[%s] Admin %s reset AOE stats for %s (%s)",
+                    interaction.guild.id, interaction.user.display_name,
+                    member.display_name, label)
+
+
 async def setup(bot):
     await bot.add_cog(AOEQueueCog(bot))
     logger.info("AOEQueueCog loaded.")

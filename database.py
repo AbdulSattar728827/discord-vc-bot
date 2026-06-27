@@ -520,6 +520,37 @@ class Database:
             """, guild_id, queue_type)
             return [dict(r) for r in rows]
 
+    async def adjust_aoe_stats(self, guild_id: str, user_id: str, queue_type: str,
+                                wins_delta: int = 0, losses_delta: int = 0,
+                                elo_delta: int = 0):
+        """Directly adjust wins/losses/elo by a delta (can be negative)."""
+        async with self.pool.acquire() as conn:
+            # Ensure row exists first
+            await conn.execute("""
+                INSERT INTO aoe_queue_stats (guild_id, user_id, queue_type)
+                VALUES ($1, $2, $3)
+                ON CONFLICT DO NOTHING
+            """, guild_id, user_id, queue_type)
+            await conn.execute("""
+                UPDATE aoe_queue_stats
+                SET wins   = GREATEST(0, wins   + $4),
+                    losses = GREATEST(0, losses + $5),
+                    elo    = GREATEST(0, elo    + $6)
+                WHERE guild_id=$1 AND user_id=$2 AND queue_type=$3
+            """, guild_id, user_id, queue_type,
+                wins_delta, losses_delta, elo_delta)
+
+    async def reset_aoe_stats(self, guild_id: str, user_id: str, queue_type: str):
+        """Reset a player's stats for a queue type back to defaults."""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO aoe_queue_stats
+                    (guild_id, user_id, queue_type, wins, losses, no_results, elo)
+                VALUES ($1, $2, $3, 0, 0, 0, 1000)
+                ON CONFLICT (guild_id, user_id, queue_type)
+                DO UPDATE SET wins=0, losses=0, no_results=0, elo=1000
+            """, guild_id, user_id, queue_type)
+
 
 # Global instance
 db = Database()
