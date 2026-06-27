@@ -446,6 +446,7 @@ class Database:
                     team1_ids   TEXT[]  DEFAULT \'{}\',
                     team2_ids   TEXT[]  DEFAULT \'{}\',
                     result      TEXT    NOT NULL DEFAULT \'pending\',
+                    civ_data    JSONB   NOT NULL DEFAULT \'{}\',
                     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     finished_at TIMESTAMPTZ
                 )
@@ -501,14 +502,17 @@ class Database:
             return row["id"]
 
     async def finish_aoe_match(self, match_id: int, result: str,
-                                team1_ids: list, team2_ids: list):
+                                team1_ids: list, team2_ids: list,
+                                civ_data: dict = None):
+        import json
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 UPDATE aoe_matches
                 SET result=$2, team1_ids=$3, team2_ids=$4,
-                    finished_at=NOW()
+                    civ_data=$5, finished_at=NOW()
                 WHERE id=$1
-            """, match_id, result, team1_ids, team2_ids)
+            """, match_id, result, team1_ids, team2_ids,
+                json.dumps(civ_data or {}))
 
     async def get_aoe_leaderboard(self, guild_id: str, queue_type: str) -> list:
         async with self.pool.acquire() as conn:
