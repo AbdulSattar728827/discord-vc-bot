@@ -717,14 +717,16 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             timestamp=datetime.now(timezone.utc),
         )
         view = FirstPickView(self, match, winner)
-        await interaction.response.edit_message(embed=e, view=view)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=e, view=view)
 
     # ── Draft ──────────────────────────────────────────────────────────────────
 
     async def show_draft(self, interaction: discord.Interaction, match: MatchState):
         embed = await self._build_draft_embed(interaction.guild, match)
         view  = DraftView(self, match)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=embed, view=view)
 
     async def _build_draft_embed(self, guild: discord.Guild,
                                   match: MatchState) -> discord.Embed:
@@ -777,19 +779,22 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             color=0x95A5A6,
         )
         view = ChangeCaptainView(self, match, team)
-        await interaction.response.edit_message(embed=e, view=view)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=e, view=view)
 
     # ── Pre-match teams display ────────────────────────────────────────────────
 
     async def show_pre_match(self, interaction: discord.Interaction, match: MatchState):
         embed = await self._build_teams_embed(interaction.guild, match, phase="pre_match")
         view  = PreMatchView(self, match)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=embed, view=view)
 
     async def show_in_match(self, interaction: discord.Interaction, match: MatchState):
         embed = await self._build_teams_embed(interaction.guild, match, phase="in_match")
         view  = InMatchView(self, match)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=embed, view=view)
 
     async def _build_teams_embed(self, guild: discord.Guild, match: MatchState,
                                   phase: str = "pre_match") -> discord.Embed:
@@ -886,7 +891,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             inline=False,
         )
         e.set_footer(text=f"Match ID: {match.match_id} • Thread closes in {RESULT_DISPLAY_SECS}s")
-        await interaction.edit_original_response(embed=e, view=None)
+        await interaction.message.edit(embed=e, view=None)
 
         await self._post_match_history(guild, match, result=f"Team {winner} Victory",
                                         winning_team=winning_team, losing_team=losing_team)
@@ -924,7 +929,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             timestamp=datetime.now(timezone.utc),
         )
         e.set_footer(text=f"Match ID: {match.match_id}")
-        await interaction.edit_original_response(embed=e, view=None)
+        await interaction.message.edit(embed=e, view=None)
 
         await self._post_match_history(guild, match, result="Cancelled",
                                         winning_team=[], losing_team=[])
@@ -1305,6 +1310,281 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await interaction.followup.send(embed=e, ephemeral=True)
         for qt in queues:
             await self._update_leaderboard(interaction.guild, qt)
+
+
+    # ── Admin match control commands ──────────────────────────────────────────
+
+    def _get_active_matches_list(self, guild: discord.Guild) -> list[MatchState]:
+        """Return all active matches for the guild."""
+        return self._get_matches(guild.id)
+
+    def _find_match_by_id(self, guild: discord.Guild, match_id: int) -> MatchState | None:
+        """Find an active match by its ID."""
+        for match in self._get_matches(guild.id):
+            if match.match_id == match_id:
+                return match
+        return None
+
+    @discord.app_commands.command(
+        name="aoe_listmatches",
+        description="List all active AOE matches (admin only).",
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_listmatches(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        matches = self._get_active_matches_list(interaction.guild)
+
+        if not matches:
+            await interaction.followup.send("📭 No active matches right now.", ephemeral=True)
+            return
+
+        e = discord.Embed(
+            title="⚔️ Active AOE Matches",
+            color=0xE67E22,
+            timestamp=datetime.now(timezone.utc),
+        )
+        for match in matches:
+            t1 = ", ".join(p.display_name for p in match.team1) or "TBD"
+            t2 = ", ".join(p.display_name for p in match.team2) or "TBD"
+            e.add_field(
+                name=f"Match #{match.match_id} — {match.queue_type.upper()} [{match.phase}]",
+                value=f"🔴 {t1}\n🔵 {t2}",
+                inline=False,
+            )
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="aoe_forcecancel",
+        description="Force cancel an active AOE match (admin only).",
+    )
+    @discord.app_commands.describe(match_id="Match ID to cancel (use /aoe_listmatches to find it)")
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forcecancel(self, interaction: discord.Interaction, match_id: int):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        gid   = str(guild.id)
+        match = self._find_match_by_id(guild, match_id)
+
+        if not match:
+            await interaction.followup.send(
+                f"❌ No active match with ID **#{match_id}** found. Use `/aoe_listmatches` to see active matches.",
+                ephemeral=True)
+            return
+
+        qt = match.queue_type
+
+        # Update DB — no result for all players
+        for p in match.all_players:
+            await db.update_aoe_stats(gid, str(p.id), qt, result="no_result")
+
+        t1_ids = [str(p.id) for p in match.team1]
+        t2_ids = [str(p.id) for p in match.team2]
+        await db.finish_aoe_match(match.match_id, "cancelled", t1_ids, t2_ids)
+
+        # Update thread if it exists
+        if match.thread:
+            try:
+                e = discord.Embed(
+                    title=f"🚫 Match Force Cancelled — {qt.upper()}",
+                    description=f"This match was force cancelled by an admin.\nNo ELO changes. Thread closes in {RESULT_DISPLAY_SECS}s.",
+                    color=0x95A5A6,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                e.set_footer(text=f"Match ID: {match.match_id} • Cancelled by {interaction.user.display_name}")
+                await match.thread.send(embed=e)
+            except Exception:
+                pass
+
+        await self._post_match_history(guild, match, result="Force Cancelled (Admin)",
+                                        winning_team=[], losing_team=[])
+
+        if match in self._get_matches(guild.id):
+            self._get_matches(guild.id).remove(match)
+
+        # Confirm to admin
+        e2 = discord.Embed(title="✅ Match Force Cancelled", color=0x95A5A6,
+                           timestamp=datetime.now(timezone.utc))
+        e2.add_field(name="🎮 Match ID",   value=f"#{match_id}",        inline=True)
+        e2.add_field(name="📋 Queue",      value=qt.upper(),             inline=True)
+        e2.add_field(name="👥 Players",
+                     value=", ".join(p.display_name for p in match.all_players),
+                     inline=False)
+        e2.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e2, ephemeral=True)
+
+        # Delete thread after delay
+        if match.thread:
+            await asyncio.sleep(RESULT_DISPLAY_SECS)
+            try:
+                await match.thread.delete()
+            except Exception:
+                pass
+
+        logger.info("[%s] Admin %s force-cancelled match #%s",
+                    guild.id, interaction.user.display_name, match_id)
+
+    @discord.app_commands.command(
+        name="aoe_forcestart",
+        description="Force start an active AOE match (admin only).",
+    )
+    @discord.app_commands.describe(match_id="Match ID to start (use /aoe_listmatches to find it)")
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forcestart(self, interaction: discord.Interaction, match_id: int):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+
+        if not match:
+            await interaction.followup.send(
+                f"❌ No active match with ID **#{match_id}** found. Use `/aoe_listmatches` to see active matches.",
+                ephemeral=True)
+            return
+
+        if match.phase == "in_match":
+            await interaction.followup.send(
+                f"⚠️ Match **#{match_id}** is already in progress!", ephemeral=True)
+            return
+
+        # Force complete the draft if not done — assign remaining players to teams evenly
+        while match.remaining:
+            picker = match.current_picker()
+            player = match.remaining[0]
+            match.pick_player(player)
+
+        match.phase = "in_match"
+
+        # Post in thread
+        if match.thread:
+            try:
+                embed = await self._build_teams_embed(guild, match, phase="in_match")
+                embed.set_footer(
+                    text=f"Match ID: {match.match_id} • Force started by {interaction.user.display_name}")
+                view = InMatchView(self, match)
+                await match.thread.send(embed=embed, view=view)
+            except Exception as ex:
+                logger.warning("[%s] Could not post force start in thread: %s", guild.id, ex)
+
+        e = discord.Embed(title="✅ Match Force Started", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID", value=f"#{match_id}",   inline=True)
+        e.add_field(name="📋 Queue",    value=match.queue_type.upper(), inline=True)
+        t1 = ", ".join(p.display_name for p in match.team1)
+        t2 = ", ".join(p.display_name for p in match.team2)
+        e.add_field(name="🔴 Team 1",   value=t1, inline=True)
+        e.add_field(name="🔵 Team 2",   value=t2, inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        logger.info("[%s] Admin %s force-started match #%s",
+                    guild.id, interaction.user.display_name, match_id)
+
+    @discord.app_commands.command(
+        name="aoe_forcevictory",
+        description="Force assign victory to a team in an active match (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches to find it)",
+        winning_team="Which team wins",
+    )
+    @discord.app_commands.choices(winning_team=[
+        discord.app_commands.Choice(name="Team 1 🔴", value=1),
+        discord.app_commands.Choice(name="Team 2 🔵", value=2),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forcevictory(self, interaction: discord.Interaction,
+                                match_id: int, winning_team: int):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        gid   = str(guild.id)
+        match = self._find_match_by_id(guild, match_id)
+
+        if not match:
+            await interaction.followup.send(
+                f"❌ No active match with ID **#{match_id}** found. Use `/aoe_listmatches` to see active matches.",
+                ephemeral=True)
+            return
+
+        qt           = match.queue_type
+        winning      = match.team1 if winning_team == 1 else match.team2
+        losing       = match.team2 if winning_team == 1 else match.team1
+
+        # Update ELO + stats
+        for p in winning:
+            await db.update_aoe_stats(gid, str(p.id), qt, result="win")
+        for p in losing:
+            await db.update_aoe_stats(gid, str(p.id), qt, result="loss")
+
+        # Award coins to winners
+        for p in winning:
+            await db.add_coins(gid, str(p.id), WIN_COINS)
+
+        t1_ids = [str(p.id) for p in match.team1]
+        t2_ids = [str(p.id) for p in match.team2]
+        await db.finish_aoe_match(match.match_id, f"team{winning_team}", t1_ids, t2_ids)
+
+        # Post result in thread
+        if match.thread:
+            try:
+                e_thread = discord.Embed(
+                    title=f"🏆 Team {winning_team} Victory! — {qt.upper()} (Admin Override)",
+                    color=0xFFD700,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                t1_lines = []
+                for p in match.team1:
+                    stats   = await db.get_aoe_stats(gid, str(p.id), qt)
+                    change  = f"+{ELO_CHANGE}" if winning_team == 1 else f"-{ELO_CHANGE}"
+                    cap_tag = " 👑" if p == match.captain1 else ""
+                    t1_lines.append(f"{p.display_name}{cap_tag} — **{stats['elo']}** ELO ({change})")
+                e_thread.add_field(
+                    name=f"{'🏆' if winning_team==1 else '💔'} Team 1",
+                    value="\n".join(t1_lines), inline=True)
+                t2_lines = []
+                for p in match.team2:
+                    stats   = await db.get_aoe_stats(gid, str(p.id), qt)
+                    change  = f"+{ELO_CHANGE}" if winning_team == 2 else f"-{ELO_CHANGE}"
+                    cap_tag = " 👑" if p == match.captain2 else ""
+                    t2_lines.append(f"{p.display_name}{cap_tag} — **{stats['elo']}** ELO ({change})")
+                e_thread.add_field(
+                    name=f"{'🏆' if winning_team==2 else '💔'} Team 2",
+                    value="\n".join(t2_lines), inline=True)
+                e_thread.add_field(
+                    name="🧀 Coin Reward",
+                    value=f"Winning team each received **{WIN_COINS} 🧀 Cheese Coins!**",
+                    inline=False)
+                e_thread.set_footer(
+                    text=f"Match ID: {match.match_id} • Decided by {interaction.user.display_name} • Thread closes in {RESULT_DISPLAY_SECS}s")
+                await match.thread.send(embed=e_thread)
+            except Exception as ex:
+                logger.warning("[%s] Could not post force victory in thread: %s", guild.id, ex)
+
+        await self._post_match_history(guild, match, result=f"Team {winning_team} Victory (Admin)",
+                                        winning_team=winning, losing_team=losing)
+        await self._update_leaderboard(guild, qt)
+
+        if match in self._get_matches(guild.id):
+            self._get_matches(guild.id).remove(match)
+
+        # Confirm to admin
+        e2 = discord.Embed(title=f"✅ Force Victory — Team {winning_team}",
+                           color=0xFFD700, timestamp=datetime.now(timezone.utc))
+        e2.add_field(name="🎮 Match ID",    value=f"#{match_id}",        inline=True)
+        e2.add_field(name="📋 Queue",       value=qt.upper(),             inline=True)
+        e2.add_field(name="🏆 Winners",     value=", ".join(p.display_name for p in winning), inline=False)
+        e2.add_field(name="💔 Losers",      value=", ".join(p.display_name for p in losing),  inline=False)
+        e2.add_field(name="🧀 Coins Given", value=f"{WIN_COINS} per winner", inline=True)
+        e2.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e2, ephemeral=True)
+
+        # Delete thread after delay
+        if match.thread:
+            await asyncio.sleep(RESULT_DISPLAY_SECS)
+            try:
+                await match.thread.delete()
+            except Exception:
+                pass
+
+        logger.info("[%s] Admin %s force-assigned victory to team %s in match #%s",
+                    guild.id, interaction.user.display_name, winning_team, match_id)
 
 
 async def setup(bot):
