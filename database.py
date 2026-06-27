@@ -76,6 +76,7 @@ class Database:
                     PRIMARY KEY (guild_id, user_id)
                 )
             """)
+        await self._create_aoe_tables()
 
     # ── Stats ──────────────────────────────────────────────────────────────────
 
@@ -414,6 +415,110 @@ class Database:
     async def close(self):
         if self.pool:
             await self.pool.close()
+
+
+    async def close(self):
+        if self.pool:
+            await self.pool.close()
+
+    # ── AOE Queue ──────────────────────────────────────────────────────────────
+
+    async def _create_aoe_tables(self):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS aoe_queue_stats (
+                    guild_id    TEXT    NOT NULL,
+                    user_id     TEXT    NOT NULL,
+                    queue_type  TEXT    NOT NULL,
+                    wins        INTEGER NOT NULL DEFAULT 0,
+                    losses      INTEGER NOT NULL DEFAULT 0,
+                    no_results  INTEGER NOT NULL DEFAULT 0,
+                    elo         INTEGER NOT NULL DEFAULT 1000,
+                    PRIMARY KEY (guild_id, user_id, queue_type)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS aoe_matches (
+                    id          SERIAL  PRIMARY KEY,
+                    guild_id    TEXT    NOT NULL,
+                    queue_type  TEXT    NOT NULL,
+                    player_ids  TEXT[]  NOT NULL,
+                    team1_ids   TEXT[]  DEFAULT \'{}\',
+                    team2_ids   TEXT[]  DEFAULT \'{}\',
+                    result      TEXT    NOT NULL DEFAULT \'pending\',
+                    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    finished_at TIMESTAMPTZ
+                )
+            """)
+
+    async def get_aoe_stats(self, guild_id: str, user_id: str, queue_type: str) -> dict:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT wins, losses, no_results, elo
+                   FROM aoe_queue_stats
+                   WHERE guild_id=$1 AND user_id=$2 AND queue_type=$3""",
+                guild_id, user_id, queue_type
+            )
+            if not row:
+                return {"wins": 0, "losses": 0, "no_results": 0, "elo": 1000}
+            return dict(row)
+
+    async def update_aoe_stats(self, guild_id: str, user_id: str,
+                                queue_type: str, result: str):
+        async with self.pool.acquire() as conn:
+            if result == "win":
+                await conn.execute("""
+                    INSERT INTO aoe_queue_stats (guild_id, user_id, queue_type, wins, elo)
+                    VALUES ($1, $2, $3, 1, 1025)
+                    ON CONFLICT (guild_id, user_id, queue_type)
+                    DO UPDATE SET wins = aoe_queue_stats.wins + 1,
+                                  elo  = GREATEST(0, aoe_queue_stats.elo + 25)
+                """, guild_id, user_id, queue_type)
+            elif result == "loss":
+                await conn.execute("""
+                    INSERT INTO aoe_queue_stats (guild_id, user_id, queue_type, losses, elo)
+                    VALUES ($1, $2, $3, 1, 975)
+                    ON CONFLICT (guild_id, user_id, queue_type)
+                    DO UPDATE SET losses = aoe_queue_stats.losses + 1,
+                                  elo    = GREATEST(0, aoe_queue_stats.elo - 25)
+                """, guild_id, user_id, queue_type)
+            else:
+                await conn.execute("""
+                    INSERT INTO aoe_queue_stats (guild_id, user_id, queue_type, no_results)
+                    VALUES ($1, $2, $3, 1)
+                    ON CONFLICT (guild_id, user_id, queue_type)
+                    DO UPDATE SET no_results = aoe_queue_stats.no_results + 1
+                """, guild_id, user_id, queue_type)
+
+    async def create_aoe_match(self, guild_id: str, queue_type: str,
+                                player_ids: list) -> int:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO aoe_matches (guild_id, queue_type, player_ids)
+                VALUES ($1, $2, $3)
+                RETURNING id
+            """, guild_id, queue_type, player_ids)
+            return row["id"]
+
+    async def finish_aoe_match(self, match_id: int, result: str,
+                                team1_ids: list, team2_ids: list):
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE aoe_matches
+                SET result=$2, team1_ids=$3, team2_ids=$4,
+                    finished_at=NOW()
+                WHERE id=$1
+            """, match_id, result, team1_ids, team2_ids)
+
+    async def get_aoe_leaderboard(self, guild_id: str, queue_type: str) -> list:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT user_id, wins, losses, no_results, elo
+                FROM aoe_queue_stats
+                WHERE guild_id=$1 AND queue_type=$2
+                ORDER BY elo DESC, wins DESC
+            """, guild_id, queue_type)
+            return [dict(r) for r in rows]
 
 
 # Global instance

@@ -63,6 +63,7 @@ async def main():
         await bot.load_extension("cogs.stats")
         await bot.load_extension("cogs.admin")
         await bot.load_extension("cogs.coins")
+        await bot.load_extension("cogs.aoe_queue")
         logger.info("All cogs loaded.")
         await bot.start(token)
 
