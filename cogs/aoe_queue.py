@@ -42,6 +42,8 @@ AOE_CATEGORY_KEYWORD  = "AGE OF EMPIRES"
 RESULT_DISPLAY_SECS   = 60
 WIN_COINS             = 5
 
+QUEUE_TIMEOUT_SECS = 1800   # 30 minutes — auto-remove from queue if not filled
+
 AOE_CIVS = [
     "Chinese", "Jin Dynasty", "Zhu Xi's Legacy",
     "Abbasid Dynasty", "Ayyubids",
@@ -497,6 +499,8 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         self._queues: dict        = {}
         self._queue_messages: dict = {}
         self._matches: dict       = {}
+        # {guild_id: {queue_type: {member_id: asyncio.Task}}}
+        self._queue_timers: dict  = {}
 
     def _is_admin(self, member) -> bool:
         return member.guild_permissions.administrator or member.guild_permissions.manage_channels
@@ -509,6 +513,45 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
     def _get_matches(self, guild_id: int) -> list:
         return self._matches.setdefault(guild_id, [])
+
+    def _get_timers(self, guild_id: int, queue_type: str) -> dict:
+        return self._queue_timers.setdefault(guild_id, {}).setdefault(queue_type, {})
+
+    def _cancel_timer(self, guild_id: int, queue_type: str, member_id: int):
+        timer = self._get_timers(guild_id, queue_type).pop(member_id, None)
+        if timer and not timer.done():
+            timer.cancel()
+
+    def _start_timer(self, guild: discord.Guild, queue_type: str, member: discord.Member):
+        self._cancel_timer(guild.id, queue_type, member.id)
+        task = asyncio.create_task(
+            self._queue_timeout(guild, queue_type, member))
+        self._get_timers(guild.id, queue_type)[member.id] = task
+
+    async def _queue_timeout(self, guild: discord.Guild, queue_type: str, member: discord.Member):
+        await asyncio.sleep(QUEUE_TIMEOUT_SECS)
+        queue = self._get_queue(guild.id, queue_type)
+        if member not in queue:
+            return   # already popped or left
+
+        queue.remove(member)
+        self._get_timers(guild.id, queue_type).pop(member.id, None)
+        logger.info("[%s] %s auto-removed from %s queue (timeout)",
+                    guild.id, member.display_name, queue_type)
+
+        # Refresh queue embed
+        await self._post_queue_embed(guild, queue_type)
+
+        # DM the player
+        try:
+            await member.send(
+                f"⏰ **Queue Timeout** — You were automatically removed from the "
+                f"**{queue_type.upper()} AOE queue** in **{guild.name}** "
+                f"because the queue didn't fill within 30 minutes. "
+                f"Rejoin anytime you're ready!"
+            )
+        except Exception:
+            pass   # DMs may be closed
 
     def _find_match_by_id(self, guild, match_id: int):
         for m in self._get_matches(guild.id):
@@ -620,8 +663,10 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 return
 
         queue.append(member)
+        self._start_timer(guild, queue_type, member)
         await interaction.followup.send(
-            f"✅ You joined the **{queue_type.upper()}** queue! ({len(queue)}/{QUEUE_CONFIGS[queue_type]['size']})",
+            f"✅ You joined the **{queue_type.upper()}** queue! ({len(queue)}/{QUEUE_CONFIGS[queue_type]['size']})\n"
+            f"⏰ You'll be auto-removed in **30 minutes** if the queue doesn't fill.",
             ephemeral=True)
         await self._post_queue_embed(guild, queue_type)
 
@@ -641,6 +686,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             await interaction.followup.send("⚠️ You're not in this queue!", ephemeral=True)
             return
         queue.remove(member)
+        self._cancel_timer(guild.id, queue_type, member.id)
         await interaction.followup.send(f"✅ You left the **{queue_type.upper()}** queue.", ephemeral=True)
         await self._post_queue_embed(guild, queue_type)
 
@@ -650,6 +696,10 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         match          = MatchState(queue_type, players)
         match.match_id = await db.create_aoe_match(str(guild.id), queue_type, [str(p.id) for p in players])
         self._get_matches(guild.id).append(match)
+
+        # Cancel queue timers for all matched players
+        for p in players:
+            self._cancel_timer(guild.id, queue_type, p.id)
 
         thread   = await self._create_match_thread(guild, match, queue_channel)
         mentions = " ".join(p.mention for p in players)
