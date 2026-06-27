@@ -646,6 +646,29 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             match.temp_vc1 = vc1
             match.temp_vc2 = vc2
             logger.info("[%s] Created temp VCs for match #%s", guild.id, match.match_id)
+
+            # Move team players into their respective temp VCs
+            # regardless of which VC they're currently in
+            for player in match.team1:
+                member = guild.get_member(player.id)
+                if member and member.voice and member.voice.channel:
+                    try:
+                        await member.move_to(vc1)
+                        logger.info("[%s] Moved %s to %s", guild.id, member.display_name, vc1.name)
+                    except Exception as ex:
+                        logger.warning("[%s] Could not move %s to temp VC1: %s",
+                                       guild.id, member.display_name, ex)
+
+            for player in match.team2:
+                member = guild.get_member(player.id)
+                if member and member.voice and member.voice.channel:
+                    try:
+                        await member.move_to(vc2)
+                        logger.info("[%s] Moved %s to %s", guild.id, member.display_name, vc2.name)
+                    except Exception as ex:
+                        logger.warning("[%s] Could not move %s to temp VC2: %s",
+                                       guild.id, member.display_name, ex)
+
         except Exception as ex:
             logger.error("[%s] Failed to create temp VCs: %s", guild.id, ex)
 
