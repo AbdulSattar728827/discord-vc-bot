@@ -1,11 +1,12 @@
 """
 cogs/aoe_queue.py — AOE 4 Queue System
 - 4 queue channels: 1v1, 2v2, 3v3, 4v4
-- Join/Leave queue buttons
-- Auto draft with coin flip + snake pick order
+- Join/Leave queue buttons — queue embed always stays clean at bottom
+- All match activity (coin flip, draft, result) in private threads
+- Thread named after captains e.g. "⚔️ 1v1 Match #5 — MicroMan vs Ragnar"
+- Thread auto-deleted 60s after match ends
 - ELO system (default 1000, ±25 per match)
-- Per-queue leaderboards
-- Match history channel
+- Per-queue leaderboards + match history channel
 """
 
 import discord
@@ -22,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 QUEUE_CONFIGS = {
     "1v1": {"size": 2,  "team_size": 1, "pick_order": []},
-    "2v2": {"size": 4,  "team_size": 2, "pick_order": [0, 1, 0]},       # cap picks 1, then 1-1
-    "3v3": {"size": 6,  "team_size": 3, "pick_order": [0, 1, 1, 0]},    # 1-2-1
-    "4v4": {"size": 8,  "team_size": 4, "pick_order": [0, 1, 1, 0, 0, 1]}, # 1-2-2-1
+    "2v2": {"size": 4,  "team_size": 2, "pick_order": [0, 1, 0]},
+    "3v3": {"size": 6,  "team_size": 3, "pick_order": [0, 1, 1, 0]},
+    "4v4": {"size": 8,  "team_size": 4, "pick_order": [0, 1, 1, 0, 0, 1]},
 }
 
 QUEUE_CHANNEL_NAMES = {
@@ -41,10 +42,12 @@ LEADERBOARD_CHANNEL_NAMES = {
     "4v4": "4v4-aoe-leaderboard",
 }
 
-MATCH_HISTORY_CHANNEL = "aoe-match-history"
-DEFAULT_ELO           = 1000
-ELO_CHANGE            = 25
-AOE_CATEGORY_KEYWORD  = "AGE OF EMPIRES"
+MATCH_HISTORY_CHANNEL  = "aoe-match-history"
+DEFAULT_ELO            = 1000
+ELO_CHANGE             = 25
+AOE_CATEGORY_KEYWORD   = "AGE OF EMPIRES"
+RESULT_DISPLAY_SECS    = 60   # how long result shows before thread is deleted
+WIN_COINS              = 5    # 🧀 coins awarded to winning team
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -56,7 +59,6 @@ def find_aoe_category(guild: discord.Guild):
     )
 
 def elo_bar(elo: int) -> str:
-    """Visual ELO indicator."""
     if elo >= 1200: return "🔥"
     if elo >= 1100: return "⭐"
     if elo >= 1000: return "🟢"
@@ -73,9 +75,10 @@ class MatchState:
         self.team_size   = cfg["team_size"]
         self.pick_order  = cfg["pick_order"]
         self.all_players = players.copy()
-        self.match_id    = None  # set after DB insert
+        self.match_id    = None   # set after DB insert
+        self.thread      = None   # discord.Thread — set after creation
 
-        # Captains: randomly selected
+        # Captains randomly selected
         shuffled = players.copy()
         random.shuffle(shuffled)
         self.captain1: discord.Member = shuffled[0]
@@ -85,33 +88,36 @@ class MatchState:
         self.team1: list[discord.Member] = [self.captain1]
         self.team2: list[discord.Member] = [self.captain2]
 
-        # Remaining players to be drafted
+        # Remaining players to draft
         self.remaining: list[discord.Member] = [
             p for p in players if p not in (self.captain1, self.captain2)
         ]
 
         # Draft state
-        self.pick_step        = 0   # index into pick_order
-        self.draft_complete   = False
-        self.coin_flip_done   = False
-        self.first_pick_team  = None  # 1 or 2 — who picks first after flip
-        self.phase            = "coin_flip"  # coin_flip | draft | pre_match | in_match
+        self.pick_step       = 0
+        self.draft_complete  = False
+        self.coin_flip_done  = False
+        self.first_pick_team = None   # 1 or 2
+        self.phase           = "coin_flip"  # coin_flip | draft | pre_match | in_match
 
-        # Message reference
-        self.message: discord.Message | None = None
+        # The single message inside the thread that gets edited throughout
+        self.thread_message: discord.Message | None = None
 
-    def current_picker(self) -> discord.Member:
-        """Which captain is picking right now."""
+    def thread_name(self) -> str:
+        """Generate thread name. Uses captain names once both are known."""
+        if self.queue_type == "1v1":
+            return f"⚔️ 1v1 Match #{self.match_id} — {self.captain1.display_name} vs {self.captain2.display_name}"
+        return f"⚔️ {self.queue_type.upper()} Match #{self.match_id} — {self.captain1.display_name}'s Team vs {self.captain2.display_name}'s Team"
+
+    def current_picker(self) -> discord.Member | None:
         if self.pick_step >= len(self.pick_order):
             return None
         team_idx = self.pick_order[self.pick_step]
-        # Adjust for first_pick_team
         if self.first_pick_team == 2:
             team_idx = 1 - team_idx
         return self.captain1 if team_idx == 0 else self.captain2
 
     def pick_player(self, player: discord.Member):
-        """Add player to the current picker's team."""
         picker = self.current_picker()
         if picker == self.captain1:
             self.team1.append(player)
@@ -127,18 +133,21 @@ class MatchState:
         if team == 1:
             old = self.captain1
             self.captain1 = new_captain
-            # Swap in team list
-            idx = self.team1.index(new_captain)
-            self.team1[idx] = old
-            self.team1[self.team1.index(old)] = new_captain
-            # Ensure captain is first
-            self.team1.remove(new_captain)
+            if new_captain in self.team1:
+                idx = self.team1.index(new_captain)
+                self.team1[idx] = old
+            self.team1.remove(new_captain) if new_captain in self.team1 else None
             self.team1.insert(0, new_captain)
+            if old not in self.team1:
+                self.team1.append(old)
         else:
             old = self.captain2
             self.captain2 = new_captain
-            self.team2.remove(new_captain)
+            if new_captain in self.team2:
+                self.team2.remove(new_captain)
             self.team2.insert(0, new_captain)
+            if old not in self.team2:
+                self.team2.append(old)
 
     def team_of(self, member: discord.Member) -> int | None:
         if member in self.team1: return 1
@@ -146,7 +155,7 @@ class MatchState:
         return None
 
 
-# ── Queue channel View (persistent Join/Leave buttons) ────────────────────────
+# ── Queue embed View (persistent Join/Leave) ──────────────────────────────────
 
 class QueueView(discord.ui.View):
     def __init__(self, cog: "AOEQueueCog", queue_type: str):
@@ -169,7 +178,7 @@ class QueueView(discord.ui.View):
 
 class CoinFlipView(discord.ui.View):
     def __init__(self, cog: "AOEQueueCog", match: MatchState, flipper: discord.Member):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120)
         self.cog     = cog
         self.match   = match
         self.flipper = flipper
@@ -177,7 +186,8 @@ class CoinFlipView(discord.ui.View):
     @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary)
     async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.flipper.id:
-            await interaction.response.send_message("❌ Only the coin flipper can do this!", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Only the coin flipper can choose!", ephemeral=True)
             return
         await self.cog.resolve_flip(interaction, self.match, "heads")
         self.stop()
@@ -185,45 +195,47 @@ class CoinFlipView(discord.ui.View):
     @discord.ui.button(label="🪙 Tails", style=discord.ButtonStyle.primary)
     async def tails(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.flipper.id:
-            await interaction.response.send_message("❌ Only the coin flipper can do this!", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Only the coin flipper can choose!", ephemeral=True)
             return
         await self.cog.resolve_flip(interaction, self.match, "tails")
         self.stop()
 
 
-# ── First pick choice View ─────────────────────────────────────────────────────
+# ── First pick View ────────────────────────────────────────────────────────────
 
 class FirstPickView(discord.ui.View):
-    def __init__(self, cog: "AOEQueueCog", match: MatchState, winner_captain: discord.Member):
-        super().__init__(timeout=60)
-        self.cog            = cog
-        self.match          = match
-        self.winner_captain = winner_captain
+    def __init__(self, cog: "AOEQueueCog", match: MatchState, winner: discord.Member):
+        super().__init__(timeout=120)
+        self.cog    = cog
+        self.match  = match
+        self.winner = winner
 
     @discord.ui.button(label="⚡ First Pick", style=discord.ButtonStyle.success)
     async def first(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.winner_captain.id:
-            await interaction.response.send_message("❌ Only the coin flip winner can choose!", ephemeral=True)
+        if interaction.user.id != self.winner.id:
+            await interaction.response.send_message(
+                "❌ Only the flip winner can choose!", ephemeral=True)
             return
-        team = self.match.team_of(self.winner_captain)
-        self.match.first_pick_team = team
+        self.match.first_pick_team = self.match.team_of(self.winner)
         self.match.phase = "draft"
         await self.cog.show_draft(interaction, self.match)
         self.stop()
 
     @discord.ui.button(label="🛡️ Second Pick", style=discord.ButtonStyle.secondary)
     async def second(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.winner_captain.id:
-            await interaction.response.send_message("❌ Only the coin flip winner can choose!", ephemeral=True)
+        if interaction.user.id != self.winner.id:
+            await interaction.response.send_message(
+                "❌ Only the flip winner can choose!", ephemeral=True)
             return
-        team = self.match.team_of(self.winner_captain)
+        team = self.match.team_of(self.winner)
         self.match.first_pick_team = 2 if team == 1 else 1
         self.match.phase = "draft"
         await self.cog.show_draft(interaction, self.match)
         self.stop()
 
 
-# ── Draft View (captain picks players) ────────────────────────────────────────
+# ── Draft View ─────────────────────────────────────────────────────────────────
 
 class DraftView(discord.ui.View):
     def __init__(self, cog: "AOEQueueCog", match: MatchState):
@@ -234,17 +246,15 @@ class DraftView(discord.ui.View):
 
     def _build(self):
         self.clear_items()
-        picker = self.match.current_picker()
 
-        # Player pick buttons
-        for player in self.match.remaining:
+        # Player pick buttons (row 0 and 1)
+        for i, player in enumerate(self.match.remaining):
             btn = discord.ui.Button(
                 label=player.display_name,
                 style=discord.ButtonStyle.primary,
-                custom_id=f"pick_{player.id}"
+                row=i // 4,
             )
-            async def callback(interaction: discord.Interaction,
-                               p=player, b=btn):
+            async def callback(interaction: discord.Interaction, p=player):
                 if interaction.user.id != self.match.current_picker().id:
                     await interaction.response.send_message(
                         "❌ It's not your turn to pick!", ephemeral=True)
@@ -257,45 +267,43 @@ class DraftView(discord.ui.View):
             btn.callback = callback
             self.add_item(btn)
 
-        # Change captain button — team 1 captain
+        # Change captain buttons (row 2)
         cap1_btn = discord.ui.Button(
-            label=f"🔄 Change Team 1 Captain",
+            label="🔄 Change Team 1 Captain",
             style=discord.ButtonStyle.secondary,
-            row=2
+            row=2,
         )
         async def change_cap1(interaction: discord.Interaction):
             if interaction.user.id != self.match.captain1.id:
                 await interaction.response.send_message(
-                    "❌ Only Team 1's captain can change captaincy!", ephemeral=True)
+                    "❌ Only Team 1's captain can do this!", ephemeral=True)
                 return
             await self.cog.show_change_captain(interaction, self.match, team=1)
         cap1_btn.callback = change_cap1
         self.add_item(cap1_btn)
 
-        # Change captain button — team 2 captain
         cap2_btn = discord.ui.Button(
-            label=f"🔄 Change Team 2 Captain",
+            label="🔄 Change Team 2 Captain",
             style=discord.ButtonStyle.secondary,
-            row=2
+            row=2,
         )
         async def change_cap2(interaction: discord.Interaction):
             if interaction.user.id != self.match.captain2.id:
                 await interaction.response.send_message(
-                    "❌ Only Team 2's captain can change captaincy!", ephemeral=True)
+                    "❌ Only Team 2's captain can do this!", ephemeral=True)
                 return
             await self.cog.show_change_captain(interaction, self.match, team=2)
         cap2_btn.callback = change_cap2
         self.add_item(cap2_btn)
 
-        # Cancel match
+        # Cancel (row 3)
         cancel_btn = discord.ui.Button(
             label="🚫 Cancel Match",
             style=discord.ButtonStyle.danger,
-            row=3
+            row=3,
         )
         async def cancel(interaction: discord.Interaction):
-            if not self.cog._is_admin(interaction.user) and \
-               interaction.user not in self.match.all_players:
+            if not self.cog._is_participant(interaction.user, self.match):
                 await interaction.response.send_message("❌ Not your match!", ephemeral=True)
                 return
             await self.cog.cancel_match(interaction, self.match)
@@ -303,7 +311,7 @@ class DraftView(discord.ui.View):
         self.add_item(cancel_btn)
 
 
-# ── Change Captain Select View ─────────────────────────────────────────────────
+# ── Change Captain View ────────────────────────────────────────────────────────
 
 class ChangeCaptainView(discord.ui.View):
     def __init__(self, cog: "AOEQueueCog", match: MatchState, team: int):
@@ -316,39 +324,41 @@ class ChangeCaptainView(discord.ui.View):
         current_cap  = match.captain1 if team == 1 else match.captain2
         options      = [m for m in team_members if m != current_cap]
 
-        if not options:
-            return
+        if options:
+            select = discord.ui.Select(
+                placeholder=f"Select new Team {team} Captain...",
+                options=[
+                    discord.SelectOption(label=m.display_name, value=str(m.id))
+                    for m in options
+                ],
+            )
+            async def on_select(interaction: discord.Interaction):
+                new_id  = int(select.values[0])
+                new_cap = discord.utils.get(team_members, id=new_id)
+                if not new_cap:
+                    await interaction.response.send_message("❌ Player not found!", ephemeral=True)
+                    return
+                match.replace_captain(team, new_cap)
+                # Rename thread to reflect new captains
+                if match.thread:
+                    try:
+                        await match.thread.edit(name=match.thread_name())
+                    except Exception:
+                        pass
+                await self.cog.show_draft(interaction, match)
+                self.stop()
+            select.callback = on_select
+            self.add_item(select)
 
-        select = discord.ui.Select(
-            placeholder=f"Select new Team {team} Captain...",
-            options=[
-                discord.SelectOption(label=m.display_name, value=str(m.id))
-                for m in options
-            ]
-        )
-
-        async def on_select(interaction: discord.Interaction):
-            new_id  = int(select.values[0])
-            new_cap = discord.utils.get(team_members, id=new_id)
-            if not new_cap:
-                await interaction.response.send_message("❌ Player not found!", ephemeral=True)
-                return
-            match.replace_captain(team, new_cap)
-            await self.cog.show_draft(interaction, match)
-            self.stop()
-
-        select.callback = on_select
-        self.add_item(select)
-
-        cancel = discord.ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary)
+        back_btn = discord.ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary)
         async def back(interaction: discord.Interaction):
             await self.cog.show_draft(interaction, match)
             self.stop()
-        cancel.callback = back
-        self.add_item(cancel)
+        back_btn.callback = back
+        self.add_item(back_btn)
 
 
-# ── Pre-match View (Start + Cancel) ───────────────────────────────────────────
+# ── Pre-match View ─────────────────────────────────────────────────────────────
 
 class PreMatchView(discord.ui.View):
     def __init__(self, cog: "AOEQueueCog", match: MatchState):
@@ -358,8 +368,7 @@ class PreMatchView(discord.ui.View):
 
     @discord.ui.button(label="⚔️ Start Match", style=discord.ButtonStyle.success)
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_admin(interaction.user) and \
-           interaction.user not in self.match.all_players:
+        if not self.cog._is_participant(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         self.match.phase = "in_match"
@@ -368,15 +377,14 @@ class PreMatchView(discord.ui.View):
 
     @discord.ui.button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_admin(interaction.user) and \
-           interaction.user not in self.match.all_players:
+        if not self.cog._is_participant(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         await self.cog.cancel_match(interaction, self.match)
         self.stop()
 
 
-# ── In-Match View (result buttons) ────────────────────────────────────────────
+# ── In-match View ──────────────────────────────────────────────────────────────
 
 class InMatchView(discord.ui.View):
     def __init__(self, cog: "AOEQueueCog", match: MatchState):
@@ -386,8 +394,7 @@ class InMatchView(discord.ui.View):
 
     @discord.ui.button(label="🏆 Team 1 Victory", style=discord.ButtonStyle.success)
     async def team1_win(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_admin(interaction.user) and \
-           interaction.user not in self.match.all_players:
+        if not self.cog._is_participant(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         await self.cog.resolve_match(interaction, self.match, winner=1)
@@ -395,8 +402,7 @@ class InMatchView(discord.ui.View):
 
     @discord.ui.button(label="🏆 Team 2 Victory", style=discord.ButtonStyle.primary)
     async def team2_win(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_admin(interaction.user) and \
-           interaction.user not in self.match.all_players:
+        if not self.cog._is_participant(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         await self.cog.resolve_match(interaction, self.match, winner=2)
@@ -404,8 +410,7 @@ class InMatchView(discord.ui.View):
 
     @discord.ui.button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_admin(interaction.user) and \
-           interaction.user not in self.match.all_players:
+        if not self.cog._is_participant(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         await self.cog.cancel_match(interaction, self.match)
@@ -422,12 +427,17 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         self._queues: dict[int, dict[str, list[discord.Member]]] = {}
         # {guild_id: {queue_type: message}} — persistent queue embeds
         self._queue_messages: dict[int, dict[str, discord.Message]] = {}
-        # {guild_id: [MatchState, ...]} — active matches
+        # {guild_id: [MatchState, ...]}
         self._matches: dict[int, list[MatchState]] = {}
+        # Per-member lock to prevent duplicate queue joins
+        self._processing: set[str] = set()
 
     def _is_admin(self, member: discord.Member) -> bool:
         return (member.guild_permissions.administrator or
                 member.guild_permissions.manage_channels)
+
+    def _is_participant(self, member: discord.Member, match: MatchState) -> bool:
+        return self._is_admin(member) or member in match.all_players
 
     def _get_queue(self, guild_id: int, queue_type: str) -> list[discord.Member]:
         return self._queues.setdefault(guild_id, {}).setdefault(queue_type, [])
@@ -435,32 +445,38 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
     def _get_matches(self, guild_id: int) -> list[MatchState]:
         return self._matches.setdefault(guild_id, [])
 
-    # ── Channel setup ──────────────────────────────────────────────────────────
+    # ── Channel / thread setup ─────────────────────────────────────────────────
 
     async def _get_or_create_channel(self, guild: discord.Guild, name: str,
-                                      category: discord.CategoryChannel = None,
-                                      read_only: bool = False) -> discord.TextChannel:
+                                      category=None, read_only: bool = True):
         ch = discord.utils.get(guild.text_channels, name=name)
         if ch:
             return ch
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(
                 view_channel=True,
-                send_messages=False if read_only else True,
+                send_messages=False,
                 add_reactions=False,
             ),
             guild.me: discord.PermissionOverwrite(
                 view_channel=True, send_messages=True,
                 manage_messages=True, embed_links=True,
+                create_private_threads=True, manage_threads=True,
             ),
         }
-        try:
-            ch = await guild.create_text_channel(
-                name, overwrites=overwrites, category=category
+        if not read_only:
+            overwrites[guild.default_role] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=False,   # members can't post, only use buttons
+                add_reactions=False,
+                use_application_commands=True,
             )
+        try:
+            ch = await guild.create_text_channel(name, overwrites=overwrites,
+                                                  category=category)
             logger.info("[%s] Created #%s", guild.id, name)
         except discord.Forbidden:
-            logger.error("[%s] Cannot create #%s", guild.id, name)
+            logger.error("[%s] Cannot create #%s — missing permission", guild.id, name)
             return None
         return ch
 
@@ -471,22 +487,40 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
         for qtype, ch_name in QUEUE_CHANNEL_NAMES.items():
             ch = await self._get_or_create_channel(guild, ch_name, category, read_only=False)
-            if not ch:
-                continue
-            # Post or refresh the queue embed
-            await self._post_queue_embed(guild, qtype, ch)
+            if ch:
+                await self._post_queue_embed(guild, qtype, ch)
 
-        for qtype, ch_name in LEADERBOARD_CHANNEL_NAMES.items():
+        for ch_name in list(LEADERBOARD_CHANNEL_NAMES.values()) + [MATCH_HISTORY_CHANNEL]:
             await self._get_or_create_channel(guild, ch_name, category, read_only=True)
 
-        await self._get_or_create_channel(guild, MATCH_HISTORY_CHANNEL, category, read_only=True)
+    async def _create_match_thread(self, guild: discord.Guild,
+                                    match: MatchState,
+                                    queue_channel: discord.TextChannel) -> discord.Thread:
+        """Create a private thread for the match inside the queue channel."""
+        thread = await queue_channel.create_thread(
+            name=match.thread_name(),
+            type=discord.ChannelType.private_thread,
+            auto_archive_duration=60,
+            reason=f"AOE Match #{match.match_id}",
+        )
+        # Add all players to the thread
+        for player in match.all_players:
+            try:
+                await thread.add_user(player)
+            except Exception as e:
+                logger.warning("[%s] Could not add %s to thread: %s",
+                               guild.id, player.display_name, e)
+        match.thread = thread
+        logger.info("[%s] Created match thread: %s", guild.id, thread.name)
+        return thread
+
+    # ── Queue embed ────────────────────────────────────────────────────────────
 
     async def _post_queue_embed(self, guild: discord.Guild, queue_type: str,
                                  channel: discord.TextChannel = None):
         if channel is None:
             channel = discord.utils.get(
-                guild.text_channels, name=QUEUE_CHANNEL_NAMES[queue_type]
-            )
+                guild.text_channels, name=QUEUE_CHANNEL_NAMES[queue_type])
         if not channel:
             return
 
@@ -509,24 +543,23 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
         view = QueueView(self, queue_type)
 
-        # Try to edit existing message, else post new
+        # Always delete old embed and repost at bottom so it stays prominent
         existing = self._queue_messages.get(gid, {}).get(queue_type)
         if existing:
             try:
-                await existing.edit(embed=e, view=view)
-                return
+                await existing.delete()
             except Exception:
                 pass
 
-        # Purge old bot messages and post fresh
         try:
-            await channel.purge(limit=10, check=lambda m: m.author == guild.me)
+            await channel.purge(limit=5, check=lambda m: m.author == guild.me)
         except Exception:
             pass
+
         msg = await channel.send(embed=e, view=view)
         self._queue_messages.setdefault(gid, {})[queue_type] = msg
 
-    # ── Queue join/leave ───────────────────────────────────────────────────────
+    # ── Queue join / leave ─────────────────────────────────────────────────────
 
     async def handle_join(self, interaction: discord.Interaction, queue_type: str):
         await interaction.response.defer(ephemeral=True)
@@ -535,26 +568,21 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         gid    = guild.id
         queue  = self._get_queue(gid, queue_type)
 
-        # Check already in this queue
         if member in queue:
             await interaction.followup.send("⚠️ You're already in this queue!", ephemeral=True)
             return
 
-        # Check already in another queue
         for qt, q in self._queues.get(gid, {}).items():
             if member in q and qt != queue_type:
                 await interaction.followup.send(
                     f"⚠️ You're already in the **{qt.upper()}** queue! Leave it first.",
-                    ephemeral=True
-                )
+                    ephemeral=True)
                 return
 
-        # Check already in an active match
         for match in self._get_matches(gid):
             if member in match.all_players:
                 await interaction.followup.send(
-                    "⚠️ You're already in an active match!", ephemeral=True
-                )
+                    "⚠️ You're already in an active match!", ephemeral=True)
                 return
 
         queue.append(member)
@@ -565,15 +593,13 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await interaction.followup.send(
             f"✅ You joined the **{queue_type.upper()}** queue! "
             f"({len(queue)}/{QUEUE_CONFIGS[queue_type]['size']})",
-            ephemeral=True
-        )
+            ephemeral=True)
         await self._post_queue_embed(guild, queue_type)
 
-        # Check if queue is full
         if len(queue) >= QUEUE_CONFIGS[queue_type]["size"]:
             players = queue.copy()
-            self._queues[gid][queue_type] = []  # clear queue
-            await self._post_queue_embed(guild, queue_type)  # show empty queue
+            self._queues[gid][queue_type] = []
+            await self._post_queue_embed(guild, queue_type)
             await self._start_match(guild, queue_type, players, interaction.channel)
 
     async def handle_leave(self, interaction: discord.Interaction, queue_type: str):
@@ -588,53 +614,47 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
         queue.remove(member)
         await interaction.followup.send(
-            f"✅ You left the **{queue_type.upper()}** queue.", ephemeral=True
-        )
+            f"✅ You left the **{queue_type.upper()}** queue.", ephemeral=True)
         await self._post_queue_embed(guild, queue_type)
 
     # ── Match start ────────────────────────────────────────────────────────────
 
     async def _start_match(self, guild: discord.Guild, queue_type: str,
                             players: list[discord.Member],
-                            channel: discord.TextChannel):
-        cfg   = QUEUE_CONFIGS[queue_type]
-        match = MatchState(queue_type, players)
-
-        # Insert into DB
-        player_ids = [str(p.id) for p in players]
+                            queue_channel: discord.TextChannel):
+        match          = MatchState(queue_type, players)
         match.match_id = await db.create_aoe_match(
-            str(guild.id), queue_type, player_ids
-        )
+            str(guild.id), queue_type, [str(p.id) for p in players])
         self._get_matches(guild.id).append(match)
 
-        # Ping all players
-        mentions = " ".join(p.mention for p in players)
-        ping_msg = await channel.send(
-            f"🎮 **Queue popped!** {mentions}\n"
-            f"Your **{queue_type.upper()}** match is starting!"
-        )
-        await asyncio.sleep(2)
-        try:
-            await ping_msg.delete()
-        except Exception:
-            pass
+        # Create private thread
+        thread = await self._create_match_thread(guild, match, queue_channel)
 
-        # 1v1: skip coin flip/draft
+        # Ping all players in thread
+        mentions = " ".join(p.mention for p in players)
+        await thread.send(
+            f"🎮 **Queue popped!** {mentions}\n"
+            f"Your **{queue_type.upper()}** match is ready! All activity happens here."
+        )
+
         if queue_type == "1v1":
             match.draft_complete = True
             match.phase          = "pre_match"
-            await self._show_1v1_match(guild, match, channel)
+            await self._show_1v1_pre_match(guild, match, thread)
         else:
-            await self._show_coin_flip(guild, match, channel)
+            await self._show_coin_flip(guild, match, thread)
 
-    async def _show_1v1_match(self, guild: discord.Guild, match: MatchState,
-                               channel: discord.TextChannel):
-        gid = str(guild.id)
-        elo1 = (await db.get_aoe_stats(gid, str(match.team1[0].id), "1v1"))["elo"]
-        elo2 = (await db.get_aoe_stats(gid, str(match.team2[0].id), "1v1"))["elo"]
+    # ── 1v1 pre-match ──────────────────────────────────────────────────────────
+
+    async def _show_1v1_pre_match(self, guild: discord.Guild,
+                                   match: MatchState, thread: discord.Thread):
+        gid  = str(guild.id)
+        qt   = match.queue_type
+        elo1 = (await db.get_aoe_stats(gid, str(match.team1[0].id), qt))["elo"]
+        elo2 = (await db.get_aoe_stats(gid, str(match.team2[0].id), qt))["elo"]
 
         e = discord.Embed(
-            title="⚔️ AOE 4 — 1v1 Match Ready!",
+            title=f"⚔️ 1v1 Match Ready!",
             color=0xE67E22,
             timestamp=datetime.now(timezone.utc),
         )
@@ -652,14 +672,13 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         e.set_footer(text=f"Match ID: {match.match_id}")
 
         view = PreMatchView(self, match)
-        msg  = await channel.send(embed=e, view=view)
-        match.message = msg
+        msg  = await thread.send(embed=e, view=view)
+        match.thread_message = msg
 
     # ── Coin flip ──────────────────────────────────────────────────────────────
 
-    async def _show_coin_flip(self, guild: discord.Guild, match: MatchState,
-                               channel: discord.TextChannel):
-        # Captain 1 does the flip
+    async def _show_coin_flip(self, guild: discord.Guild,
+                               match: MatchState, thread: discord.Thread):
         flipper = match.captain1
         e = discord.Embed(
             title="🪙 Coin Flip!",
@@ -673,14 +692,14 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             timestamp=datetime.now(timezone.utc),
         )
         view = CoinFlipView(self, match, flipper)
-        msg  = await channel.send(embed=e, view=view)
-        match.message = msg
+        msg  = await thread.send(embed=e, view=view)
+        match.thread_message = msg
 
     async def resolve_flip(self, interaction: discord.Interaction,
                             match: MatchState, choice: str):
-        result  = random.choice(["heads", "tails"])
-        won     = choice == result
-        winner  = match.captain1 if won else match.captain2
+        result = random.choice(["heads", "tails"])
+        won    = choice == result
+        winner = match.captain1 if won else match.captain2
 
         e = discord.Embed(
             title=f"🪙 Coin landed on **{result.upper()}**!",
@@ -701,49 +720,47 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         view  = DraftView(self, match)
         await interaction.response.edit_message(embed=embed, view=view)
 
-    async def _build_draft_embed(self, guild: discord.Guild, match: MatchState) -> discord.Embed:
-        gid     = str(guild.id)
-        picker  = match.current_picker()
-        qt      = match.queue_type
+    async def _build_draft_embed(self, guild: discord.Guild,
+                                  match: MatchState) -> discord.Embed:
+        gid    = str(guild.id)
+        qt     = match.queue_type
+        picker = match.current_picker()
 
         e = discord.Embed(
-            title=f"⚔️ AOE 4 — {qt.upper()} Draft",
+            title=f"⚔️ {qt.upper()} Draft",
             color=0x3498DB,
             timestamp=datetime.now(timezone.utc),
         )
 
-        # Team 1
         t1_lines = []
         for p in match.team1:
-            stats = await db.get_aoe_stats(gid, str(p.id), qt)
+            stats   = await db.get_aoe_stats(gid, str(p.id), qt)
             cap_tag = " 👑" if p == match.captain1 else ""
-            t1_lines.append(f"{p.display_name}{cap_tag} — {elo_bar(stats['elo'])} **{stats['elo']}** ELO")
+            t1_lines.append(
+                f"{p.display_name}{cap_tag} — {elo_bar(stats['elo'])} **{stats['elo']}** ELO")
         e.add_field(name="🔴 Team 1", value="\n".join(t1_lines) or "—", inline=True)
 
-        # Team 2
         t2_lines = []
         for p in match.team2:
-            stats = await db.get_aoe_stats(gid, str(p.id), qt)
+            stats   = await db.get_aoe_stats(gid, str(p.id), qt)
             cap_tag = " 👑" if p == match.captain2 else ""
-            t2_lines.append(f"{p.display_name}{cap_tag} — {elo_bar(stats['elo'])} **{stats['elo']}** ELO")
+            t2_lines.append(
+                f"{p.display_name}{cap_tag} — {elo_bar(stats['elo'])} **{stats['elo']}** ELO")
         e.add_field(name="🔵 Team 2", value="\n".join(t2_lines) or "—", inline=True)
 
-        # Remaining pool
         pool_lines = []
         for p in match.remaining:
             stats = await db.get_aoe_stats(gid, str(p.id), qt)
-            pool_lines.append(f"{p.display_name} — {elo_bar(stats['elo'])} **{stats['elo']}** ELO")
+            pool_lines.append(
+                f"{p.display_name} — {elo_bar(stats['elo'])} **{stats['elo']}** ELO")
         e.add_field(
             name="🎯 Player Pool",
             value="\n".join(pool_lines) or "All players drafted!",
             inline=False,
         )
 
-        if picker:
-            e.set_footer(text=f"👑 {picker.display_name}'s turn to pick | Match ID: {match.match_id}")
-        else:
-            e.set_footer(text=f"Draft complete! | Match ID: {match.match_id}")
-
+        footer = f"👑 {picker.display_name}'s turn to pick" if picker else "Draft complete!"
+        e.set_footer(text=f"{footer} | Match ID: {match.match_id}")
         return e
 
     async def show_change_captain(self, interaction: discord.Interaction,
@@ -756,11 +773,16 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         view = ChangeCaptainView(self, match, team)
         await interaction.response.edit_message(embed=e, view=view)
 
-    # ── Pre-match ──────────────────────────────────────────────────────────────
+    # ── Pre-match teams display ────────────────────────────────────────────────
 
     async def show_pre_match(self, interaction: discord.Interaction, match: MatchState):
         embed = await self._build_teams_embed(interaction.guild, match, phase="pre_match")
         view  = PreMatchView(self, match)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def show_in_match(self, interaction: discord.Interaction, match: MatchState):
+        embed = await self._build_teams_embed(interaction.guild, match, phase="in_match")
+        view  = InMatchView(self, match)
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def _build_teams_embed(self, guild: discord.Guild, match: MatchState,
@@ -768,13 +790,14 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         gid = str(guild.id)
         qt  = match.queue_type
 
-        title_map = {
-            "pre_match": f"✅ Teams Set — {qt.upper()} Match",
+        colors = {"pre_match": 0x2ECC71, "in_match": 0xE74C3C}
+        titles = {
+            "pre_match": f"✅ Teams Set — {qt.upper()}",
             "in_match":  f"⚔️ Match In Progress — {qt.upper()}",
         }
         e = discord.Embed(
-            title=title_map.get(phase, f"⚔️ {qt.upper()} Match"),
-            color=0x2ECC71 if phase == "pre_match" else 0xE74C3C,
+            title=titles.get(phase, f"⚔️ {qt.upper()}"),
+            color=colors.get(phase, 0xE67E22),
             timestamp=datetime.now(timezone.utc),
         )
 
@@ -782,25 +805,19 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         for p in match.team1:
             stats   = await db.get_aoe_stats(gid, str(p.id), qt)
             cap_tag = " 👑" if p == match.captain1 else ""
-            t1_lines.append(f"{p.display_name}{cap_tag} — {elo_bar(stats['elo'])} **{stats['elo']}**")
+            t1_lines.append(
+                f"{p.display_name}{cap_tag} — {elo_bar(stats['elo'])} **{stats['elo']}**")
         e.add_field(name="🔴 Team 1", value="\n".join(t1_lines), inline=True)
 
         t2_lines = []
         for p in match.team2:
             stats   = await db.get_aoe_stats(gid, str(p.id), qt)
             cap_tag = " 👑" if p == match.captain2 else ""
-            t2_lines.append(f"{p.display_name}{cap_tag} — {elo_bar(stats['elo'])} **{stats['elo']}**")
+            t2_lines.append(
+                f"{p.display_name}{cap_tag} — {elo_bar(stats['elo'])} **{stats['elo']}**")
         e.add_field(name="🔵 Team 2", value="\n".join(t2_lines), inline=True)
-
         e.set_footer(text=f"Match ID: {match.match_id}")
         return e
-
-    # ── In-match ───────────────────────────────────────────────────────────────
-
-    async def show_in_match(self, interaction: discord.Interaction, match: MatchState):
-        embed = await self._build_teams_embed(interaction.guild, match, phase="in_match")
-        view  = InMatchView(self, match)
-        await interaction.response.edit_message(embed=embed, view=view)
 
     # ── Resolve match ──────────────────────────────────────────────────────────
 
@@ -811,21 +828,24 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         gid   = str(guild.id)
         qt    = match.queue_type
 
-        winning_team  = match.team1 if winner == 1 else match.team2
-        losing_team   = match.team2 if winner == 1 else match.team1
+        winning_team = match.team1 if winner == 1 else match.team2
+        losing_team  = match.team2 if winner == 1 else match.team1
 
-        # Update DB stats + ELO
         for p in winning_team:
             await db.update_aoe_stats(gid, str(p.id), qt, result="win")
         for p in losing_team:
             await db.update_aoe_stats(gid, str(p.id), qt, result="loss")
 
-        # Save match result
+        # Award cheese coins to winners
+        for p in winning_team:
+            await db.add_coins(gid, str(p.id), WIN_COINS)
+        logger.info("[%s] Awarded %d 🧀 coins to %s winners of match #%s",
+                    guild.id, WIN_COINS, qt, match.match_id)
+
         t1_ids = [str(p.id) for p in match.team1]
         t2_ids = [str(p.id) for p in match.team2]
         await db.finish_aoe_match(match.match_id, f"team{winner}", t1_ids, t2_ids)
 
-        # Build result embed
         e = discord.Embed(
             title=f"🏆 Team {winner} Victory! — {qt.upper()}",
             color=0xFFD700,
@@ -837,35 +857,46 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             stats   = await db.get_aoe_stats(gid, str(p.id), qt)
             change  = f"+{ELO_CHANGE}" if winner == 1 else f"-{ELO_CHANGE}"
             cap_tag = " 👑" if p == match.captain1 else ""
-            t1_lines.append(f"{p.display_name}{cap_tag} — **{stats['elo']}** ELO ({change})")
+            t1_lines.append(
+                f"{p.display_name}{cap_tag} — **{stats['elo']}** ELO ({change})")
         e.add_field(
             name=f"{'🏆' if winner==1 else '💔'} Team 1",
-            value="\n".join(t1_lines), inline=True
-        )
+            value="\n".join(t1_lines), inline=True)
 
         t2_lines = []
         for p in match.team2:
             stats   = await db.get_aoe_stats(gid, str(p.id), qt)
             change  = f"+{ELO_CHANGE}" if winner == 2 else f"-{ELO_CHANGE}"
             cap_tag = " 👑" if p == match.captain2 else ""
-            t2_lines.append(f"{p.display_name}{cap_tag} — **{stats['elo']}** ELO ({change})")
+            t2_lines.append(
+                f"{p.display_name}{cap_tag} — **{stats['elo']}** ELO ({change})")
         e.add_field(
             name=f"{'🏆' if winner==2 else '💔'} Team 2",
-            value="\n".join(t2_lines), inline=True
-        )
-        e.set_footer(text=f"Match ID: {match.match_id}")
+            value="\n".join(t2_lines), inline=True)
 
+        e.add_field(
+            name="🧀 Coin Reward",
+            value=f"Winning team each received **{WIN_COINS} 🧀 Cheese Coins!**",
+            inline=False,
+        )
+        e.set_footer(text=f"Match ID: {match.match_id} • Thread closes in {RESULT_DISPLAY_SECS}s")
         await interaction.edit_original_response(embed=e, view=None)
 
-        # Post to match history
         await self._post_match_history(guild, match, result=f"Team {winner} Victory",
                                         winning_team=winning_team, losing_team=losing_team)
-
-        # Update leaderboards
         await self._update_leaderboard(guild, qt)
 
-        # Remove match from active
-        self._get_matches(guild.id).remove(match)
+        if match in self._get_matches(guild.id):
+            self._get_matches(guild.id).remove(match)
+
+        # Delete thread after 60s
+        await asyncio.sleep(RESULT_DISPLAY_SECS)
+        if match.thread:
+            try:
+                await match.thread.delete()
+                logger.info("[%s] Deleted match thread for match #%s", guild.id, match.match_id)
+            except Exception as ex:
+                logger.warning("[%s] Could not delete thread: %s", guild.id, ex)
 
     async def cancel_match(self, interaction: discord.Interaction, match: MatchState):
         await interaction.response.defer()
@@ -873,7 +904,6 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         gid   = str(guild.id)
         qt    = match.queue_type
 
-        # Update DB — no result for all players
         for p in match.all_players:
             await db.update_aoe_stats(gid, str(p.id), qt, result="no_result")
 
@@ -883,7 +913,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
         e = discord.Embed(
             title=f"🚫 Match Cancelled — {qt.upper()}",
-            description="This match has been cancelled. No ELO changes.",
+            description=f"This match has been cancelled. No ELO changes.\nThread closes in {RESULT_DISPLAY_SECS}s.",
             color=0x95A5A6,
             timestamp=datetime.now(timezone.utc),
         )
@@ -896,6 +926,13 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         if match in self._get_matches(guild.id):
             self._get_matches(guild.id).remove(match)
 
+        await asyncio.sleep(RESULT_DISPLAY_SECS)
+        if match.thread:
+            try:
+                await match.thread.delete()
+            except Exception as ex:
+                logger.warning("[%s] Could not delete thread: %s", guild.id, ex)
+
     # ── Match history ──────────────────────────────────────────────────────────
 
     async def _post_match_history(self, guild: discord.Guild, match: MatchState,
@@ -904,21 +941,19 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         if not ch:
             return
 
-        qt = match.queue_type
-        e  = discord.Embed(
+        gid = str(guild.id)
+        qt  = match.queue_type
+        e   = discord.Embed(
             title=f"📜 Match #{match.match_id} — {qt.upper()} | {result}",
             color=0xFFD700 if "Victory" in result else 0x95A5A6,
             timestamp=datetime.now(timezone.utc),
         )
 
-        gid = str(guild.id)
-
         t1_lines = []
         for p in match.team1:
             stats   = await db.get_aoe_stats(gid, str(p.id), qt)
             cap_tag = " 👑" if p == match.captain1 else ""
-            won     = p in winning_team
-            tag     = "🏆" if won else ("💔" if losing_team else "🚫")
+            tag     = "🏆" if p in winning_team else ("💔" if losing_team else "🚫")
             t1_lines.append(f"{tag} {p.display_name}{cap_tag} — **{stats['elo']}** ELO")
         e.add_field(name="🔴 Team 1", value="\n".join(t1_lines) or "—", inline=True)
 
@@ -926,13 +961,11 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         for p in match.team2:
             stats   = await db.get_aoe_stats(gid, str(p.id), qt)
             cap_tag = " 👑" if p == match.captain2 else ""
-            won     = p in winning_team
-            tag     = "🏆" if won else ("💔" if losing_team else "🚫")
+            tag     = "🏆" if p in winning_team else ("💔" if losing_team else "🚫")
             t2_lines.append(f"{tag} {p.display_name}{cap_tag} — **{stats['elo']}** ELO")
         e.add_field(name="🔵 Team 2", value="\n".join(t2_lines) or "—", inline=True)
 
         e.set_footer(text=f"Match ID: {match.match_id} • {guild.name}")
-
         try:
             await ch.send(embed=e)
         except Exception as ex:
@@ -964,7 +997,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 name    = member.display_name if member else f"Unknown ({row['user_id']})"
                 total   = row["wins"] + row["losses"]
                 win_pct = f"{(row['wins']/total*100):.1f}%" if total > 0 else "0%"
-                medal   = ["🥇","🥈","🥉"][i] if i < 3 else f"`{i+1}.`"
+                medal   = ["🥇", "🥈", "🥉"][i] if i < 3 else f"`{i+1}.`"
                 rows.append(
                     f"{medal} **{name}** — "
                     f"W:{row['wins']} L:{row['losses']} NR:{row['no_results']} "
@@ -990,7 +1023,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         for guild in self.bot.guilds:
             await self._setup_channels(guild)
 
-    # ── Admin slash commands ───────────────────────────────────────────────────
+    # ── Admin commands ─────────────────────────────────────────────────────────
 
     @discord.app_commands.command(
         name="aoe_setup",
@@ -1000,9 +1033,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
     async def aoe_setup(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         await self._setup_channels(interaction.guild)
-        await interaction.followup.send(
-            "✅ AOE 4 queue channels set up!", ephemeral=True
-        )
+        await interaction.followup.send("✅ AOE 4 queue channels set up!", ephemeral=True)
 
     @discord.app_commands.command(
         name="aoe_leaderboard",
@@ -1017,7 +1048,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
     @discord.app_commands.command(
         name="aoe_stats",
-        description="Check your AOE 4 queue stats.",
+        description="Check AOE 4 queue stats.",
     )
     @discord.app_commands.describe(member="Member to check (leave blank for yourself)")
     async def aoe_stats(self, interaction: discord.Interaction,
@@ -1045,9 +1076,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 ),
                 inline=True,
             )
-
         await interaction.followup.send(embed=e, ephemeral=True)
-
 
     @discord.app_commands.command(
         name="aoe_addwin",
@@ -1081,19 +1110,16 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         e = discord.Embed(title="✅ AOE Win Added", color=0x57F287,
                           timestamp=datetime.now(timezone.utc))
         e.set_thumbnail(url=member.display_avatar.url)
-        e.add_field(name="👤 Player",     value=member.mention,       inline=True)
-        e.add_field(name="🎮 Queue",      value=queue_type.upper(),   inline=True)
-        e.add_field(name="➕ Added",       value=f"{amount} win(s)",   inline=True)
-        e.add_field(name="🏆 Wins",       value=str(stats["wins"]),   inline=True)
-        e.add_field(name="💔 Losses",     value=str(stats["losses"]), inline=True)
-        e.add_field(name="📊 Win Rate",   value=wp,                   inline=True)
+        e.add_field(name="👤 Player",   value=member.mention,     inline=True)
+        e.add_field(name="🎮 Queue",    value=queue_type.upper(), inline=True)
+        e.add_field(name="➕ Added",     value=f"{amount} win(s)", inline=True)
+        e.add_field(name="🏆 Wins",     value=str(stats["wins"]), inline=True)
+        e.add_field(name="💔 Losses",   value=str(stats["losses"]), inline=True)
+        e.add_field(name="📊 Win Rate", value=wp,                 inline=True)
         e.add_field(name=f"{elo_bar(stats['elo'])} ELO", value=str(stats["elo"]), inline=True)
         e.set_footer(text=f"Done by {interaction.user.display_name}")
         await interaction.followup.send(embed=e, ephemeral=True)
         await self._update_leaderboard(interaction.guild, queue_type)
-        logger.info("[%s] Admin %s added %d win(s) to %s (%s)",
-                    interaction.guild.id, interaction.user.display_name,
-                    amount, member.display_name, queue_type)
 
     @discord.app_commands.command(
         name="aoe_removewin",
@@ -1126,26 +1152,24 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 ephemeral=True)
             return
         remove = min(amount, stats["wins"])
-        await db.adjust_aoe_stats(gid, uid, queue_type, wins_delta=-remove, elo_delta=-(remove * ELO_CHANGE))
+        await db.adjust_aoe_stats(gid, uid, queue_type,
+                                   wins_delta=-remove, elo_delta=-(remove * ELO_CHANGE))
         stats = await db.get_aoe_stats(gid, uid, queue_type)
         total = stats["wins"] + stats["losses"]
         wp    = f"{(stats['wins']/total*100):.1f}%" if total > 0 else "0%"
         e = discord.Embed(title="✅ AOE Win Removed", color=0xED4245,
                           timestamp=datetime.now(timezone.utc))
         e.set_thumbnail(url=member.display_avatar.url)
-        e.add_field(name="👤 Player",     value=member.mention,        inline=True)
-        e.add_field(name="🎮 Queue",      value=queue_type.upper(),    inline=True)
-        e.add_field(name="➖ Removed",     value=f"{remove} win(s)",    inline=True)
-        e.add_field(name="🏆 Wins",       value=str(stats["wins"]),    inline=True)
-        e.add_field(name="💔 Losses",     value=str(stats["losses"]),  inline=True)
-        e.add_field(name="📊 Win Rate",   value=wp,                    inline=True)
+        e.add_field(name="👤 Player",   value=member.mention,      inline=True)
+        e.add_field(name="🎮 Queue",    value=queue_type.upper(),  inline=True)
+        e.add_field(name="➖ Removed",   value=f"{remove} win(s)",  inline=True)
+        e.add_field(name="🏆 Wins",     value=str(stats["wins"]),  inline=True)
+        e.add_field(name="💔 Losses",   value=str(stats["losses"]), inline=True)
+        e.add_field(name="📊 Win Rate", value=wp,                  inline=True)
         e.add_field(name=f"{elo_bar(stats['elo'])} ELO", value=str(stats["elo"]), inline=True)
         e.set_footer(text=f"Done by {interaction.user.display_name}")
         await interaction.followup.send(embed=e, ephemeral=True)
         await self._update_leaderboard(interaction.guild, queue_type)
-        logger.info("[%s] Admin %s removed %d win(s) from %s (%s)",
-                    interaction.guild.id, interaction.user.display_name,
-                    remove, member.display_name, queue_type)
 
     @discord.app_commands.command(
         name="aoe_addloss",
@@ -1179,19 +1203,16 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         e = discord.Embed(title="✅ AOE Loss Added", color=0xED4245,
                           timestamp=datetime.now(timezone.utc))
         e.set_thumbnail(url=member.display_avatar.url)
-        e.add_field(name="👤 Player",     value=member.mention,       inline=True)
-        e.add_field(name="🎮 Queue",      value=queue_type.upper(),   inline=True)
-        e.add_field(name="➕ Added",       value=f"{amount} loss(es)", inline=True)
-        e.add_field(name="🏆 Wins",       value=str(stats["wins"]),   inline=True)
-        e.add_field(name="💔 Losses",     value=str(stats["losses"]), inline=True)
-        e.add_field(name="📊 Win Rate",   value=wp,                   inline=True)
+        e.add_field(name="👤 Player",   value=member.mention,       inline=True)
+        e.add_field(name="🎮 Queue",    value=queue_type.upper(),   inline=True)
+        e.add_field(name="➕ Added",     value=f"{amount} loss(es)", inline=True)
+        e.add_field(name="🏆 Wins",     value=str(stats["wins"]),   inline=True)
+        e.add_field(name="💔 Losses",   value=str(stats["losses"]), inline=True)
+        e.add_field(name="📊 Win Rate", value=wp,                   inline=True)
         e.add_field(name=f"{elo_bar(stats['elo'])} ELO", value=str(stats["elo"]), inline=True)
         e.set_footer(text=f"Done by {interaction.user.display_name}")
         await interaction.followup.send(embed=e, ephemeral=True)
         await self._update_leaderboard(interaction.guild, queue_type)
-        logger.info("[%s] Admin %s added %d loss(es) to %s (%s)",
-                    interaction.guild.id, interaction.user.display_name,
-                    amount, member.display_name, queue_type)
 
     @discord.app_commands.command(
         name="aoe_removeloss",
@@ -1224,30 +1245,28 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 ephemeral=True)
             return
         remove = min(amount, stats["losses"])
-        await db.adjust_aoe_stats(gid, uid, queue_type, losses_delta=-remove, elo_delta=(remove * ELO_CHANGE))
+        await db.adjust_aoe_stats(gid, uid, queue_type,
+                                   losses_delta=-remove, elo_delta=(remove * ELO_CHANGE))
         stats = await db.get_aoe_stats(gid, uid, queue_type)
         total = stats["wins"] + stats["losses"]
         wp    = f"{(stats['wins']/total*100):.1f}%" if total > 0 else "0%"
         e = discord.Embed(title="✅ AOE Loss Removed", color=0x57F287,
                           timestamp=datetime.now(timezone.utc))
         e.set_thumbnail(url=member.display_avatar.url)
-        e.add_field(name="👤 Player",     value=member.mention,        inline=True)
-        e.add_field(name="🎮 Queue",      value=queue_type.upper(),    inline=True)
-        e.add_field(name="➖ Removed",     value=f"{remove} loss(es)",  inline=True)
-        e.add_field(name="🏆 Wins",       value=str(stats["wins"]),    inline=True)
-        e.add_field(name="💔 Losses",     value=str(stats["losses"]),  inline=True)
-        e.add_field(name="📊 Win Rate",   value=wp,                    inline=True)
+        e.add_field(name="👤 Player",   value=member.mention,        inline=True)
+        e.add_field(name="🎮 Queue",    value=queue_type.upper(),    inline=True)
+        e.add_field(name="➖ Removed",   value=f"{remove} loss(es)",  inline=True)
+        e.add_field(name="🏆 Wins",     value=str(stats["wins"]),    inline=True)
+        e.add_field(name="💔 Losses",   value=str(stats["losses"]),  inline=True)
+        e.add_field(name="📊 Win Rate", value=wp,                    inline=True)
         e.add_field(name=f"{elo_bar(stats['elo'])} ELO", value=str(stats["elo"]), inline=True)
         e.set_footer(text=f"Done by {interaction.user.display_name}")
         await interaction.followup.send(embed=e, ephemeral=True)
         await self._update_leaderboard(interaction.guild, queue_type)
-        logger.info("[%s] Admin %s removed %d loss(es) from %s (%s)",
-                    interaction.guild.id, interaction.user.display_name,
-                    remove, member.display_name, queue_type)
 
     @discord.app_commands.command(
         name="aoe_resetstats",
-        description="Reset a player's AOE stats for a queue type (admin only).",
+        description="Reset a player's AOE stats (admin only).",
     )
     @discord.app_commands.describe(
         member="The player to reset",
@@ -1273,16 +1292,13 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         e = discord.Embed(title="✅ AOE Stats Reset", color=0xFEE75C,
                           timestamp=datetime.now(timezone.utc))
         e.set_thumbnail(url=member.display_avatar.url)
-        e.add_field(name="👤 Player", value=member.mention,  inline=True)
-        e.add_field(name="🎮 Queue",  value=label,           inline=True)
+        e.add_field(name="👤 Player", value=member.mention, inline=True)
+        e.add_field(name="🎮 Queue",  value=label,          inline=True)
         e.add_field(name="🔄 Reset",  value="W:0 L:0 NR:0 ELO:1000", inline=True)
         e.set_footer(text=f"Done by {interaction.user.display_name}")
         await interaction.followup.send(embed=e, ephemeral=True)
         for qt in queues:
             await self._update_leaderboard(interaction.guild, qt)
-        logger.info("[%s] Admin %s reset AOE stats for %s (%s)",
-                    interaction.guild.id, interaction.user.display_name,
-                    member.display_name, label)
 
 
 async def setup(bot):
