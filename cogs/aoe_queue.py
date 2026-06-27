@@ -303,7 +303,7 @@ class DraftView(discord.ui.View):
             row=3,
         )
         async def cancel(interaction: discord.Interaction):
-            if not self.cog._is_participant(interaction.user, self.match):
+            if not self.cog._is_captain_or_admin(interaction.user, self.match):
                 await interaction.response.send_message("❌ Not your match!", ephemeral=True)
                 return
             await self.cog.cancel_match(interaction, self.match)
@@ -368,7 +368,7 @@ class PreMatchView(discord.ui.View):
 
     @discord.ui.button(label="⚔️ Start Match", style=discord.ButtonStyle.success)
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_participant(interaction.user, self.match):
+        if not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         self.match.phase = "in_match"
@@ -377,7 +377,7 @@ class PreMatchView(discord.ui.View):
 
     @discord.ui.button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_participant(interaction.user, self.match):
+        if not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         await self.cog.cancel_match(interaction, self.match)
@@ -394,7 +394,7 @@ class InMatchView(discord.ui.View):
 
     @discord.ui.button(label="🏆 Team 1 Victory", style=discord.ButtonStyle.success)
     async def team1_win(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_participant(interaction.user, self.match):
+        if not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         await self.cog.resolve_match(interaction, self.match, winner=1)
@@ -402,7 +402,7 @@ class InMatchView(discord.ui.View):
 
     @discord.ui.button(label="🏆 Team 2 Victory", style=discord.ButtonStyle.primary)
     async def team2_win(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_participant(interaction.user, self.match):
+        if not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         await self.cog.resolve_match(interaction, self.match, winner=2)
@@ -410,7 +410,7 @@ class InMatchView(discord.ui.View):
 
     @discord.ui.button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog._is_participant(interaction.user, self.match):
+        if not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Not your match!", ephemeral=True)
             return
         await self.cog.cancel_match(interaction, self.match)
@@ -438,6 +438,12 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
     def _is_participant(self, member: discord.Member, match: MatchState) -> bool:
         return self._is_admin(member) or member in match.all_players
+
+    def _is_captain_or_admin(self, member: discord.Member, match: MatchState) -> bool:
+        """Only captains and admins can control match buttons."""
+        return (self._is_admin(member) or
+                member == match.captain1 or
+                member == match.captain2)
 
     def _get_queue(self, guild_id: int, queue_type: str) -> list[discord.Member]:
         return self._queues.setdefault(guild_id, {}).setdefault(queue_type, [])
@@ -499,11 +505,11 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         """Create a private thread for the match inside the queue channel."""
         thread = await queue_channel.create_thread(
             name=match.thread_name(),
-            type=discord.ChannelType.private_thread,
+            type=discord.ChannelType.public_thread,
             auto_archive_duration=60,
             reason=f"AOE Match #{match.match_id}",
         )
-        # Add all players to the thread
+        # Ping all players so they get notified and join the thread
         for player in match.all_players:
             try:
                 await thread.add_user(player)
