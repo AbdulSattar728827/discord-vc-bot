@@ -50,7 +50,7 @@ AOE_CIVS = [
 
 WIN_COINS           = 5
 PRIVILEGED_ROLES    = {"👑 Grandmaster", "👑 King", "🔨 Moderator"}  # Can control match buttons
-RESULT_DISPLAY_SECS = 60
+RESULT_DISPLAY_SECS = 90
 AOE_CATEGORY_KEYWORD = "AGE OF EMPIRES"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -1198,7 +1198,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         e.add_field(name=f"{'🏆' if winner==2 else '💔'} Team 2", value="\n".join(t2_lines), inline=True)
         e.add_field(name="🧀 Coin Reward",
                     value=f"Winning team each received **{WIN_COINS} 🧀 Cheese Coins!**", inline=False)
-        e.set_footer(text=f"Match #{match.match_id} • Thread closes in {RESULT_DISPLAY_SECS}s")
+        e.set_footer(text=f"Match #{match.match_id} • Players moved to AOE IV General in {RESULT_DISPLAY_SECS}s")
 
         await interaction.message.edit(embed=e, view=None)
         await self._post_match_history(guild, match, result=f"Team {winner} Victory",
@@ -1207,8 +1207,9 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         if match in self._get_matches(guild.id):
             self._get_matches(guild.id).remove(match)
 
-        await self._cleanup_temp_vcs(guild, match)
+        # Wait 90s then move players and delete thread
         await asyncio.sleep(RESULT_DISPLAY_SECS)
+        await self._cleanup_temp_vcs(guild, match)
         if match.thread:
             try:
                 await match.thread.delete()
@@ -1239,8 +1240,9 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         if match in self._get_matches(guild.id):
             self._get_matches(guild.id).remove(match)
 
-        await self._cleanup_temp_vcs(guild, match)
+        # Wait 90s then move players and delete thread
         await asyncio.sleep(RESULT_DISPLAY_SECS)
+        await self._cleanup_temp_vcs(guild, match)
         if match.thread:
             try:
                 await match.thread.delete()
