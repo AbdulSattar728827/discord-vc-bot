@@ -83,6 +83,7 @@ class MatchState:
 
         self.pick_step       = 0
         self.draft_complete  = False
+        self.draft_started   = False
         self.first_pick_team = None
         self.phase           = "coin_flip"
 
@@ -113,6 +114,7 @@ class MatchState:
         return self.captain1 if team_idx == 0 else self.captain2
 
     def pick_player(self, player):
+        self.draft_started = True
         picker = self.current_picker()
         if picker == self.captain1:
             self.team1.append(player)
@@ -190,7 +192,7 @@ class CoinFlipView(discord.ui.View):
 
     @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary)
     async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.flipper.id:
+        if interaction.user.id != self.flipper.id and            not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
             return
         await self.cog.resolve_flip(interaction, self.match, "heads")
@@ -198,7 +200,7 @@ class CoinFlipView(discord.ui.View):
 
     @discord.ui.button(label="🪙 Tails", style=discord.ButtonStyle.primary)
     async def tails(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.flipper.id:
+        if interaction.user.id != self.flipper.id and            not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
             return
         await self.cog.resolve_flip(interaction, self.match, "tails")
@@ -216,7 +218,7 @@ class FirstPickView(discord.ui.View):
 
     @discord.ui.button(label="⚡ First Pick", style=discord.ButtonStyle.success)
     async def first(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.winner.id:
+        if interaction.user.id != self.winner.id and            not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Only the flip winner can choose!", ephemeral=True)
             return
         self.match.first_pick_team = self.match.team_of(self.winner)
@@ -226,7 +228,7 @@ class FirstPickView(discord.ui.View):
 
     @discord.ui.button(label="🛡️ Second Pick", style=discord.ButtonStyle.secondary)
     async def second(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.winner.id:
+        if interaction.user.id != self.winner.id and            not self.cog._is_captain_or_admin(interaction.user, self.match):
             await interaction.response.send_message("❌ Only the flip winner can choose!", ephemeral=True)
             return
         team = self.match.team_of(self.winner)
@@ -269,21 +271,37 @@ class DraftView(discord.ui.View):
         cap_row    = min(max((n + 3) // 4, 1), 2)
         cancel_row = min(cap_row + 1, 4)
 
+        # Team 1 captain swap candidates: remaining pool players + team1 members except current captain
+        team1_swap_options = [p for p in self.match.remaining] +                              [p for p in self.match.team1 if p != self.match.captain1]
+        cap1_disabled = len(team1_swap_options) == 0 or self.match.draft_started
+
         cap1_btn = discord.ui.Button(label="🔄 Change Team 1 Captain",
-                                      style=discord.ButtonStyle.secondary, row=cap_row)
+                                      style=discord.ButtonStyle.secondary,
+                                      row=cap_row, disabled=cap1_disabled)
         async def change_cap1(interaction: discord.Interaction):
-            if interaction.user.id != self.match.captain1.id:
-                await interaction.response.send_message("❌ Only Team 1's captain can do this!", ephemeral=True)
+            is_team1_cap = interaction.user.id == self.match.captain1.id
+            is_privileged = self.cog._is_captain_or_admin(interaction.user, self.match)
+            if not is_team1_cap and not is_privileged:
+                await interaction.response.send_message(
+                    "❌ Only Team 1's captain or an admin can do this!", ephemeral=True)
                 return
             await self.cog.show_change_captain(interaction, self.match, team=1)
         cap1_btn.callback = change_cap1
         self.add_item(cap1_btn)
 
+        # Team 2 captain swap candidates: remaining pool players + team2 members except current captain
+        team2_swap_options = [p for p in self.match.remaining] +                              [p for p in self.match.team2 if p != self.match.captain2]
+        cap2_disabled = len(team2_swap_options) == 0 or self.match.draft_started
+
         cap2_btn = discord.ui.Button(label="🔄 Change Team 2 Captain",
-                                      style=discord.ButtonStyle.secondary, row=cap_row)
+                                      style=discord.ButtonStyle.secondary,
+                                      row=cap_row, disabled=cap2_disabled)
         async def change_cap2(interaction: discord.Interaction):
-            if interaction.user.id != self.match.captain2.id:
-                await interaction.response.send_message("❌ Only Team 2's captain can do this!", ephemeral=True)
+            is_team2_cap = interaction.user.id == self.match.captain2.id
+            is_privileged = self.cog._is_captain_or_admin(interaction.user, self.match)
+            if not is_team2_cap and not is_privileged:
+                await interaction.response.send_message(
+                    "❌ Only Team 2's captain or an admin can do this!", ephemeral=True)
                 return
             await self.cog.show_change_captain(interaction, self.match, team=2)
         cap2_btn.callback = change_cap2
@@ -310,19 +328,42 @@ class ChangeCaptainView(discord.ui.View):
 
         team_members = match.team1 if team == 1 else match.team2
         current_cap  = match.captain1 if team == 1 else match.captain2
-        options      = [m for m in team_members if m != current_cap]
 
-        if options:
+        # Options: undrafted pool players + already drafted team members (except current cap)
+        # Players already drafted into the OTHER team are excluded
+        pool_options = list(match.remaining)
+        team_options = [m for m in team_members if m != current_cap]
+        all_options  = pool_options + team_options
+
+        if all_options:
+            select_opts = []
+            for m in all_options:
+                if m in pool_options:
+                    label = f"{m.display_name} (Pool)"
+                else:
+                    label = f"{m.display_name} (Team {team})"
+                select_opts.append(discord.SelectOption(label=label, value=str(m.id)))
+
             select = discord.ui.Select(
                 placeholder=f"Select new Team {team} Captain...",
-                options=[discord.SelectOption(label=m.display_name, value=str(m.id)) for m in options],
+                options=select_opts,
             )
             async def on_select(interaction: discord.Interaction):
                 new_id  = int(select.values[0])
-                new_cap = discord.utils.get(team_members, id=new_id)
+                # Search in both pool and team
+                new_cap = discord.utils.get(all_options, id=new_id)
                 if not new_cap:
                     await interaction.response.send_message("❌ Player not found!", ephemeral=True)
                     return
+
+                # If new cap was in the pool, move them to the team first
+                if new_cap in match.remaining:
+                    match.remaining.remove(new_cap)
+                    if team == 1:
+                        match.team1.append(new_cap)
+                    else:
+                        match.team2.append(new_cap)
+
                 match.replace_captain(team, new_cap)
                 if match.thread:
                     try:
@@ -332,6 +373,14 @@ class ChangeCaptainView(discord.ui.View):
                 await self.cog.show_draft(interaction, match)
                 self.stop()
             select.callback = on_select
+            self.add_item(select)
+        else:
+            # No valid swap candidates — show disabled placeholder
+            select = discord.ui.Select(
+                placeholder="No available players to swap with",
+                options=[discord.SelectOption(label="None", value="none")],
+                disabled=True,
+            )
             self.add_item(select)
 
         back_btn = discord.ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary)
