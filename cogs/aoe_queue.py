@@ -685,15 +685,37 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
     async def _get_or_create_general_vc(self, guild, category=None):
         vc = discord.utils.get(guild.voice_channels, name=AOE_GENERAL_VC_NAME)
         if vc:
+            # Ensure permissions are correct on existing VC too
+            try:
+                await vc.set_permissions(guild.default_role,
+                    view_channel=True, connect=True, speak=True,
+                    use_voice_activation=True, stream=True)
+                await vc.set_permissions(guild.me,
+                    view_channel=True, connect=True, speak=True,
+                    manage_channels=True, move_members=True,
+                    mute_members=True, deafen_members=True)
+            except Exception:
+                pass
             return vc
         if not category:
             category = find_aoe_category(guild)
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True),
+                view_channel=True,
+                connect=True,
+                speak=True,
+                use_voice_activation=True,
+                stream=True,
+            ),
             guild.me: discord.PermissionOverwrite(
-                view_channel=True, connect=True,
-                manage_channels=True, move_members=True),
+                view_channel=True,
+                connect=True,
+                speak=True,
+                manage_channels=True,
+                move_members=True,
+                mute_members=True,
+                deafen_members=True,
+            ),
         }
         try:
             vc = await guild.create_voice_channel(
