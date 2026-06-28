@@ -795,18 +795,39 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             logger.error("[%s] Failed to create temp VCs: %s", guild.id, ex)
 
     async def _cleanup_temp_vcs(self, guild, match):
+        # Find target VC — try exact name first, then partial match
         target_vc = discord.utils.get(guild.voice_channels, name=AOE_GENERAL_VC_NAME)
+        if not target_vc:
+            # Fallback: find any VC with "Team 1" in the AOE category
+            category = find_aoe_category(guild)
+            if category:
+                target_vc = discord.utils.find(
+                    lambda v: "team 1" in v.name.lower() and v.category == category,
+                    guild.voice_channels)
+        if not target_vc:
+            logger.error("[%s] Could not find target VC '%s' — players will be disconnected",
+                         guild.id, AOE_GENERAL_VC_NAME)
+
         for temp_vc in [match.temp_vc1, match.temp_vc2]:
             if not temp_vc:
                 continue
-            if target_vc:
-                for member in list(temp_vc.members):
+            members_in_vc = list(temp_vc.members)
+            logger.info("[%s] Cleaning up %s — %d members inside, target: %s",
+                        guild.id, temp_vc.name, len(members_in_vc),
+                        target_vc.name if target_vc else "None")
+            if target_vc and members_in_vc:
+                for member in members_in_vc:
                     try:
                         await member.move_to(target_vc)
+                        logger.info("[%s] Moved %s → %s", guild.id, member.display_name, target_vc.name)
                     except Exception as ex:
-                        logger.warning("[%s] Could not move %s: %s", guild.id, member.display_name, ex)
+                        logger.error("[%s] Could not move %s to %s: %s",
+                                     guild.id, member.display_name, target_vc.name, ex)
+            # Small delay to ensure moves complete before deleting
+            await asyncio.sleep(1)
             try:
                 await temp_vc.delete(reason=f"Match #{match.match_id} ended")
+                logger.info("[%s] Deleted temp VC: %s", guild.id, temp_vc.name)
             except Exception as ex:
                 logger.warning("[%s] Could not delete temp VC: %s", guild.id, ex)
         match.temp_vc1 = None
