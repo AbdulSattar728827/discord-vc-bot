@@ -49,6 +49,7 @@ AOE_CIVS = [
 ]
 
 WIN_COINS           = 5
+PRIVILEGED_ROLES    = {"👑 Grandmaster", "👑 King", "🔨 Moderator"}  # Can control match buttons
 RESULT_DISPLAY_SECS = 60
 AOE_CATEGORY_KEYWORD = "AGE OF EMPIRES"
 
@@ -497,7 +498,15 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         return member.guild_permissions.administrator or member.guild_permissions.manage_channels
 
     def _is_captain_or_admin(self, member, match: MatchState) -> bool:
-        return self._is_admin(member) or member == match.captain1 or member == match.captain2
+        if self._is_admin(member):
+            return True
+        if member == match.captain1 or member == match.captain2:
+            return True
+        # Grandmaster, King, Moderator roles can also control match buttons
+        member_role_names = {r.name for r in member.roles}
+        if member_role_names & PRIVILEGED_ROLES:
+            return True
+        return False
 
     def _get_queue(self, guild_id, queue_type):
         return self._queues.setdefault(guild_id, {}).setdefault(queue_type, [])
