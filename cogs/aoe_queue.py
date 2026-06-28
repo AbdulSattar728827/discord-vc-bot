@@ -33,7 +33,7 @@ OLD_LB_CHANNELS         = ["1v1-aoe-leaderboard", "2v2-aoe-leaderboard",
                             "3v3-aoe-leaderboard", "4v4-aoe-leaderboard"]
 
 QUEUE_TIMEOUT_SECS  = 1800
-AOE_TEAM_VC_NAME    = "AOE IV (Team 1)"
+AOE_GENERAL_VC_NAME = "AOE IV General"   # Permanent VC everyone moves to after match
 
 AOE_CIVS = [
     "Chinese", "Jin Dynasty", "Zhu Xi's Legacy",
@@ -670,6 +670,9 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await self._get_or_create_channel(guild, LEADERBOARD_CHANNEL_NAME, category)
         await self._get_or_create_channel(guild, MATCH_HISTORY_CHANNEL, category)
 
+        # Create permanent general VC if it doesn't exist
+        await self._get_or_create_general_vc(guild, category)
+
         # Post all 4 queue embeds in single channel — purge old ones first
         if queue_ch:
             try:
@@ -678,6 +681,28 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 logger.warning("[%s] Could not purge queue channel: %s", guild.id, ex)
             for qtype in QUEUE_CONFIGS:
                 await self._post_queue_embed(guild, qtype, queue_ch)
+
+    async def _get_or_create_general_vc(self, guild, category=None):
+        vc = discord.utils.get(guild.voice_channels, name=AOE_GENERAL_VC_NAME)
+        if vc:
+            return vc
+        if not category:
+            category = find_aoe_category(guild)
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, connect=True,
+                manage_channels=True, move_members=True),
+        }
+        try:
+            vc = await guild.create_voice_channel(
+                AOE_GENERAL_VC_NAME, category=category, overwrites=overwrites)
+            logger.info("[%s] Created permanent VC: %s", guild.id, AOE_GENERAL_VC_NAME)
+        except Exception as ex:
+            logger.error("[%s] Could not create general VC: %s", guild.id, ex)
+            return None
+        return vc
 
     async def _create_match_thread(self, guild, match, queue_channel):
         ch = discord.utils.get(guild.text_channels, name=QUEUE_CHANNEL_NAME)
@@ -738,7 +763,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             logger.error("[%s] Failed to create temp VCs: %s", guild.id, ex)
 
     async def _cleanup_temp_vcs(self, guild, match):
-        target_vc = discord.utils.get(guild.voice_channels, name=AOE_TEAM_VC_NAME)
+        target_vc = discord.utils.get(guild.voice_channels, name=AOE_GENERAL_VC_NAME)
         for temp_vc in [match.temp_vc1, match.temp_vc2]:
             if not temp_vc:
                 continue
@@ -942,7 +967,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 f"\U0001f509 Two VCs created for this match!\n"
                 f"**Team 1:** {match.temp_vc1.mention}\n"
                 f"**Team 2:** {match.temp_vc2.mention}\n"
-                f"Everyone moves to **{AOE_TEAM_VC_NAME}** when match ends.")
+                f"Everyone moves to **{AOE_GENERAL_VC_NAME}** when match ends.")
 
     async def show_civ_select(self, interaction, match):
         match.phase = "civ_select"
@@ -955,7 +980,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                 f"\U0001f509 Two VCs created for this match!\n"
                 f"**Team 1:** {match.temp_vc1.mention}\n"
                 f"**Team 2:** {match.temp_vc2.mention}\n"
-                f"Everyone moves to **{AOE_TEAM_VC_NAME}** when match ends.")
+                f"Everyone moves to **{AOE_GENERAL_VC_NAME}** when match ends.")
 
     def _build_civ_status_embed(self, guild, match):
         e = discord.Embed(
