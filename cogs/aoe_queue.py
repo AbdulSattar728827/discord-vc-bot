@@ -33,7 +33,7 @@ OLD_LB_CHANNELS         = ["1v1-aoe-leaderboard", "2v2-aoe-leaderboard",
                             "3v3-aoe-leaderboard", "4v4-aoe-leaderboard"]
 
 QUEUE_TIMEOUT_SECS  = 1800
-AOE_GENERAL_VC_NAME = "AOE IV General"   # Permanent VC everyone moves to after match
+AOE_GENERAL_VC_NAME = "AOE IV (Team 1)"  # Permanent VC everyone moves to after match
 
 AOE_CIVS = [
     "Chinese", "Jin Dynasty", "Zhu Xi's Legacy",
@@ -670,9 +670,6 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await self._get_or_create_channel(guild, LEADERBOARD_CHANNEL_NAME, category)
         await self._get_or_create_channel(guild, MATCH_HISTORY_CHANNEL, category)
 
-        # Create permanent general VC if it doesn't exist
-        await self._get_or_create_general_vc(guild, category)
-
         # Post all 4 queue embeds in single channel — purge old ones first
         if queue_ch:
             try:
@@ -751,9 +748,22 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         if not category:
             return
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, connect=True,
-                                                   manage_channels=True, move_members=True),
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True,
+                use_voice_activation=True,
+                stream=True,
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True,
+                manage_channels=True,
+                move_members=True,
+                mute_members=True,
+                deafen_members=True,
+            ),
         }
         try:
             vc1 = await guild.create_voice_channel(
