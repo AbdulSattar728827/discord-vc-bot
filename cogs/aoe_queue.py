@@ -126,23 +126,58 @@ class MatchState:
             self.draft_complete = True
             self.phase = "civ_select"
 
-    def replace_captain(self, team, new_captain):
+    def replace_captain(self, team, new_captain, from_pool=False):
         if team == 1:
             old = self.captain1
             self.captain1 = new_captain
-            if new_captain in self.team1:
-                self.team1.remove(new_captain)
-            self.team1.insert(0, new_captain)
-            if old not in self.team1:
-                self.team1.append(old)
+            if from_pool:
+                # New cap came from pool — old cap goes back to pool
+                if new_captain in self.remaining:
+                    self.remaining.remove(new_captain)
+                if old not in self.remaining:
+                    self.remaining.append(old)
+                if old in self.team1:
+                    self.team1.remove(old)
+                if new_captain not in self.team1:
+                    self.team1.insert(0, new_captain)
+                else:
+                    self.team1.remove(new_captain)
+                    self.team1.insert(0, new_captain)
+            else:
+                # New cap came from team — old cap stays in team, swaps position
+                if new_captain in self.team1:
+                    self.team1.remove(new_captain)
+                self.team1.insert(0, new_captain)
+                # Old captain moves to pool
+                if old in self.team1:
+                    self.team1.remove(old)
+                if old not in self.remaining:
+                    self.remaining.append(old)
         else:
             old = self.captain2
             self.captain2 = new_captain
-            if new_captain in self.team2:
-                self.team2.remove(new_captain)
-            self.team2.insert(0, new_captain)
-            if old not in self.team2:
-                self.team2.append(old)
+            if from_pool:
+                # New cap came from pool — old cap goes back to pool
+                if new_captain in self.remaining:
+                    self.remaining.remove(new_captain)
+                if old not in self.remaining:
+                    self.remaining.append(old)
+                if old in self.team2:
+                    self.team2.remove(old)
+                if new_captain not in self.team2:
+                    self.team2.insert(0, new_captain)
+                else:
+                    self.team2.remove(new_captain)
+                    self.team2.insert(0, new_captain)
+            else:
+                # New cap came from team — old cap moves to pool
+                if new_captain in self.team2:
+                    self.team2.remove(new_captain)
+                self.team2.insert(0, new_captain)
+                if old in self.team2:
+                    self.team2.remove(old)
+                if old not in self.remaining:
+                    self.remaining.append(old)
 
     def team_of(self, member):
         if member in self.team1: return 1
@@ -356,15 +391,8 @@ class ChangeCaptainView(discord.ui.View):
                     await interaction.response.send_message("❌ Player not found!", ephemeral=True)
                     return
 
-                # If new cap was in the pool, move them to the team first
-                if new_cap in match.remaining:
-                    match.remaining.remove(new_cap)
-                    if team == 1:
-                        match.team1.append(new_cap)
-                    else:
-                        match.team2.append(new_cap)
-
-                match.replace_captain(team, new_cap)
+                from_pool = new_cap in match.remaining
+                match.replace_captain(team, new_cap, from_pool=from_pool)
                 if match.thread:
                     try:
                         await match.thread.edit(name=match.thread_name())
