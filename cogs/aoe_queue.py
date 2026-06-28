@@ -1037,12 +1037,14 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
     async def show_pre_match(self, interaction, match):
         embed = self._build_teams_embed(match, phase="pre_match")
         view  = PreMatchView(self, match)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=embed, view=view)
 
     async def show_in_match(self, interaction, match):
         embed = self._build_teams_embed(match, phase="in_match")
         view  = InMatchView(self, match)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=embed, view=view)
 
     def _build_teams_embed(self, match, phase="pre_match"):
         qt     = match.queue_type
@@ -1111,7 +1113,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                     value=f"Winning team each received **{WIN_COINS} 🧀 Cheese Coins!**", inline=False)
         e.set_footer(text=f"Match #{match.match_id} • Thread closes in {RESULT_DISPLAY_SECS}s")
 
-        await interaction.edit_original_response(embed=e, view=None)
+        await interaction.message.edit(embed=e, view=None)
         await self._post_match_history(guild, match, result=f"Team {winner} Victory",
                                         winning_team=winning_team, losing_team=losing_team)
         await self._update_leaderboard(guild)
@@ -1144,7 +1146,7 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             description=f"Match cancelled. No changes.\nThread closes in {RESULT_DISPLAY_SECS}s.",
             color=0x95A5A6, timestamp=datetime.now(timezone.utc))
         e.set_footer(text=f"Match #{match.match_id}")
-        await interaction.edit_original_response(embed=e, view=None)
+        await interaction.message.edit(embed=e, view=None)
 
         await self._post_match_history(guild, match, result="Cancelled", winning_team=[], losing_team=[])
         if match in self._get_matches(guild.id):
