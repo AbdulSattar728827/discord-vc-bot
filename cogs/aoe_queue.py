@@ -670,8 +670,12 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await self._get_or_create_channel(guild, LEADERBOARD_CHANNEL_NAME, category)
         await self._get_or_create_channel(guild, MATCH_HISTORY_CHANNEL, category)
 
-        # Post all 4 queue embeds in single channel
+        # Post all 4 queue embeds in single channel — purge old ones first
         if queue_ch:
+            try:
+                await queue_ch.purge(limit=50, check=lambda m: m.author == guild.me)
+            except Exception as ex:
+                logger.warning("[%s] Could not purge queue channel: %s", guild.id, ex)
             for qtype in QUEUE_CONFIGS:
                 await self._post_queue_embed(guild, qtype, queue_ch)
 
