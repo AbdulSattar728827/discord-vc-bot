@@ -1515,13 +1515,15 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         for qt in QUEUE_CONFIGS:
             board = await db.get_aoe_leaderboard(str(guild.id), qt)
             now   = datetime.now(timezone.utc)
-            if not board:
+            # Only show players with at least 1 win or 1 loss
+            filtered = [r for r in board if r["wins"] > 0 or r["losses"] > 0]
+            if not filtered:
                 e = discord.Embed(title=f"⚔️ AOE 4 — {qt.upper()} Leaderboard",
                                   description="No matches played yet!",
                                   color=0xE67E22, timestamp=now)
             else:
                 rows = []
-                for i, row in enumerate(board):
+                for i, row in enumerate(filtered):
                     member  = guild.get_member(int(row["user_id"]))
                     name    = member.display_name if member else f"Unknown ({row['user_id']})"
                     total   = row["wins"] + row["losses"]
@@ -2022,6 +2024,53 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             e.add_field(name="👑 Captain", value=f"{new_player.display_name} is now captain", inline=False)
         e.set_footer(text=f"Done by {interaction.user.display_name}")
         await interaction.followup.send(embed=e, ephemeral=True)
+
+
+    @discord.app_commands.command(
+        name="aoe_removefromleaderboard",
+        description="Remove a player from the AOE leaderboard (admin only).",
+    )
+    @discord.app_commands.describe(
+        member="Player to remove",
+        queue_type="Which queue type to remove from",
+    )
+    @discord.app_commands.choices(queue_type=[
+        discord.app_commands.Choice(name="1v1", value="1v1"),
+        discord.app_commands.Choice(name="2v2", value="2v2"),
+        discord.app_commands.Choice(name="3v3", value="3v3"),
+        discord.app_commands.Choice(name="4v4", value="4v4"),
+        discord.app_commands.Choice(name="All queues", value="all"),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_removefromleaderboard(self, interaction: discord.Interaction,
+                                         member: discord.Member, queue_type: str):
+        await interaction.response.defer(ephemeral=True)
+        gid    = str(interaction.guild.id)
+        uid    = str(member.id)
+        queues = list(QUEUE_CONFIGS.keys()) if queue_type == "all" else [queue_type]
+        removed = []
+        for qt in queues:
+            stats = await db.get_aoe_stats(gid, uid, qt)
+            if stats["wins"] == 0 and stats["losses"] == 0 and stats["no_results"] == 0:
+                continue
+            await db.reset_aoe_stats(gid, uid, qt)
+            removed.append(qt.upper())
+        if not removed:
+            await interaction.followup.send(
+                f"⚠️ **{member.display_name}** has no stats to remove.", ephemeral=True)
+            return
+        label = ", ".join(removed)
+        e = discord.Embed(title="✅ Player Removed from Leaderboard",
+                          color=0xED4245, timestamp=datetime.now(timezone.utc))
+        e.set_thumbnail(url=member.display_avatar.url)
+        e.add_field(name="👤 Player", value=member.mention, inline=True)
+        e.add_field(name="🎮 Queue",  value=label,          inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        await self._update_leaderboard(interaction.guild)
+        logger.info("[%s] Admin %s removed %s from leaderboard (%s)",
+                    interaction.guild.id, interaction.user.display_name,
+                    member.display_name, label)
 
 
 async def setup(bot):
