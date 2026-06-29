@@ -35,17 +35,32 @@ OLD_LB_CHANNELS         = ["1v1-aoe-leaderboard", "2v2-aoe-leaderboard",
 QUEUE_TIMEOUT_SECS  = 1800
 AOE_GENERAL_VC_NAME = "AOE IV General"   # Permanent VC everyone moves to after match
 
+# Civ name → Discord emoji name (upload these to your server)
 AOE_CIVS = [
-    "Chinese", "Jin Dynasty", "Zhu Xi's Legacy",
-    "Abbasid Dynasty", "Ayyubids",
-    "Byzantines", "Macedonian Dynasty",
-    "Delhi Sultanate", "Tughlaq Dynasty",
-    "English", "House of Lancaster",
-    "French", "Jeanne d'Arc", "Templar Knights",
-    "Holy Roman Empire", "Order of the Dragon",
-    "Japanese", "Sengoku Daimyo",
-    "Malians", "Mongols", "Golden Horde",
-    "Ottomans", "Rus",
+    ("🎲 Random",            "aoe_random"),
+    ("Abbasid Dynasty",      "aoe_abbasid"),
+    ("Ayyubids",             "aoe_ayyubids"),
+    ("Byzantines",           "aoe_byzantines"),
+    ("Chinese",              "aoe_chinese"),
+    ("Delhi Sultanate",      "aoe_delhi"),
+    ("English",              "aoe_english"),
+    ("French",               "aoe_french"),
+    ("Golden Horde",         "aoe_golden_horde"),
+    ("Holy Roman Empire",    "aoe_hre"),
+    ("House of Lancaster",   "aoe_lancaster"),
+    ("Japanese",             "aoe_japanese"),
+    ("Jeanne d'Arc",         "aoe_jeanne"),
+    ("Jin Dynasty",          "aoe_jin_dynasty"),
+    ("Macedonian Dynasty",   "aoe_macedonian"),
+    ("Malians",              "aoe_malians"),
+    ("Mongols",              "aoe_mongols"),
+    ("Order of the Dragon",  "aoe_dragon"),
+    ("Ottomans",             "aoe_ottomans"),
+    ("Rus",                  "aoe_rus"),
+    ("Sengoku Daimyo",       "aoe_sengoku"),
+    ("Templar Knights",      "aoe_templar"),
+    ("Tughlaq Dynasty",      "aoe_tughlaq"),
+    ("Zhu Xi's Legacy",      "aoe_zhu_xi"),
 ]
 
 WIN_COINS           = 5
@@ -431,9 +446,28 @@ class CivSelectView(discord.ui.View):
     def _build(self):
         self.clear_items()
 
+        def make_civ_options(guild):
+            options = []
+            for civ_name, emoji_name in AOE_CIVS:
+                # Try to find the custom emoji in the guild
+                emoji = discord.utils.get(guild.emojis, name=emoji_name)
+                options.append(discord.SelectOption(
+                    label=civ_name,
+                    value=civ_name,
+                    emoji=emoji if emoji else None,
+                ))
+            return options
+
+        guild = None
+        if hasattr(self, 'match') and self.match.thread:
+            guild = self.match.thread.guild
+
         civ_select = discord.ui.Select(
             placeholder="🎭 Pick your civilization...",
-            options=[discord.SelectOption(label=civ, value=civ) for civ in AOE_CIVS],
+            options=make_civ_options(guild) if guild else [
+                discord.SelectOption(label=civ_name, value=civ_name)
+                for civ_name, _ in AOE_CIVS
+            ],
             row=0,
         )
         async def on_civ_select(interaction: discord.Interaction):
