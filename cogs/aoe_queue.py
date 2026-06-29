@@ -50,7 +50,7 @@ AOE_CIVS = [
 
 WIN_COINS           = 5
 PRIVILEGED_ROLES    = {"👑 Grandmaster", "👑 King", "🔨 Moderator"}  # Can control match buttons
-RESULT_DISPLAY_SECS = 90
+RESULT_DISPLAY_SECS = 30
 AOE_CATEGORY_KEYWORD = "AGE OF EMPIRES"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -124,7 +124,7 @@ class MatchState:
         self.pick_step += 1
         if not self.remaining:
             self.draft_complete = True
-            self.phase = "civ_select"
+            self.phase = "teams_confirm"
 
     def replace_captain(self, team, new_captain, from_pool=False):
         if team == 1:
@@ -296,7 +296,7 @@ class DraftView(discord.ui.View):
                     return
                 self.match.pick_player(p)
                 if self.match.draft_complete:
-                    await self.cog.show_civ_select(interaction, self.match)
+                    await self.cog.show_teams_confirm(interaction, self.match)
                 else:
                     await self.cog.show_draft(interaction, self.match)
             btn.callback = callback
@@ -498,6 +498,124 @@ class CivSelectView(discord.ui.View):
             await self.cog.cancel_match(interaction, self.match)
         cancel_btn.callback = cancel
         self.add_item(cancel_btn)
+
+
+# ── Teams Confirm View ────────────────────────────────────────────────────────
+
+class TeamsConfirmView(discord.ui.View):
+    def __init__(self, cog, match: MatchState):
+        super().__init__(timeout=300)
+        self.cog   = cog
+        self.match = match
+
+    @discord.ui.button(label="🔄 Swap Players", style=discord.ButtonStyle.secondary)
+    async def swap(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.cog._is_captain_or_admin(interaction.user, self.match):
+            await interaction.response.send_message("❌ Not your match!", ephemeral=True)
+            return
+        await self.cog.show_swap_team1_select(interaction, self.match)
+
+    @discord.ui.button(label="✅ Confirm Teams", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.cog._is_captain_or_admin(interaction.user, self.match):
+            await interaction.response.send_message("❌ Not your match!", ephemeral=True)
+            return
+        await self.cog.show_civ_select(interaction, self.match)
+
+    @discord.ui.button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.cog._is_captain_or_admin(interaction.user, self.match):
+            await interaction.response.send_message("❌ Not your match!", ephemeral=True)
+            return
+        await self.cog.cancel_match(interaction, self.match)
+        self.stop()
+
+
+# ── Swap Players View ──────────────────────────────────────────────────────────
+
+class SwapTeam1SelectView(discord.ui.View):
+    """Step 1 — pick player from Team 1 (no captains)."""
+    def __init__(self, cog, match: MatchState):
+        super().__init__(timeout=60)
+        self.cog   = cog
+        self.match = match
+
+        options = [
+            discord.SelectOption(label=p.display_name, value=str(p.id))
+            for p in match.team1 if p != match.captain1
+        ]
+        if not options:
+            options = [discord.SelectOption(label="No swappable players", value="none")]
+
+        select = discord.ui.Select(
+            placeholder="Select player from Team 1 to swap...",
+            options=options,
+            disabled=not any(p != match.captain1 for p in match.team1),
+        )
+        async def on_select(interaction: discord.Interaction):
+            if select.values[0] == "none":
+                await interaction.response.send_message("❌ No swappable players in Team 1!", ephemeral=True)
+                return
+            p1_id = int(select.values[0])
+            p1    = discord.utils.get(match.team1, id=p1_id)
+            await self.cog.show_swap_team2_select(interaction, match, p1)
+            self.stop()
+        select.callback = on_select
+        self.add_item(select)
+
+        back_btn = discord.ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary)
+        async def back(interaction: discord.Interaction):
+            await self.cog.show_teams_confirm(interaction, match)
+            self.stop()
+        back_btn.callback = back
+        self.add_item(back_btn)
+
+
+class SwapTeam2SelectView(discord.ui.View):
+    """Step 2 — pick player from Team 2 (no captains)."""
+    def __init__(self, cog, match: MatchState, p1):
+        super().__init__(timeout=60)
+        self.cog   = cog
+        self.match = match
+        self.p1    = p1
+
+        options = [
+            discord.SelectOption(label=p.display_name, value=str(p.id))
+            for p in match.team2 if p != match.captain2
+        ]
+        if not options:
+            options = [discord.SelectOption(label="No swappable players", value="none")]
+
+        select = discord.ui.Select(
+            placeholder="Select player from Team 2 to swap...",
+            options=options,
+            disabled=not any(p != match.captain2 for p in match.team2),
+        )
+        async def on_select(interaction: discord.Interaction):
+            if select.values[0] == "none":
+                await interaction.response.send_message("❌ No swappable players in Team 2!", ephemeral=True)
+                return
+            p2_id = int(select.values[0])
+            p2    = discord.utils.get(match.team2, id=p2_id)
+            # Perform the swap
+            idx1 = match.team1.index(p1)
+            idx2 = match.team2.index(p2)
+            match.team1[idx1] = p2
+            match.team2[idx2] = p1
+            await interaction.response.send_message(
+                f"✅ Swapped **{p1.display_name}** (Team 1) ↔ **{p2.display_name}** (Team 2)!",
+                ephemeral=True)
+            await self.cog.show_teams_confirm_refresh(interaction, match)
+            self.stop()
+        select.callback = on_select
+        self.add_item(select)
+
+        back_btn = discord.ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary)
+        async def back(interaction: discord.Interaction):
+            await self.cog.show_swap_team1_select(interaction, match)
+            self.stop()
+        back_btn.callback = back
+        self.add_item(back_btn)
 
 
 # ── Pre-match View ─────────────────────────────────────────────────────────────
@@ -1016,6 +1134,73 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await interaction.response.edit_message(embed=e, view=view)
 
     # ── Civ Selection ──────────────────────────────────────────────────────────
+
+    # ── Teams Confirm ─────────────────────────────────────────────────────────────
+
+    async def show_teams_confirm(self, interaction, match):
+        """Show teams confirm screen from a button interaction."""
+        match.phase = "teams_confirm"
+        embed = self._build_teams_confirm_embed(match)
+        view  = TeamsConfirmView(self, match)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=embed, view=view)
+
+    async def show_teams_confirm_refresh(self, interaction, match):
+        """Refresh teams confirm screen after a swap (no defer needed)."""
+        embed = self._build_teams_confirm_embed(match)
+        view  = TeamsConfirmView(self, match)
+        await interaction.message.edit(embed=embed, view=view)
+
+    async def show_teams_confirm_fresh(self, guild, match, thread):
+        """Post teams confirm as fresh message in thread (for 2v2/3v3/4v4)."""
+        match.phase = "teams_confirm"
+        embed = self._build_teams_confirm_embed(match)
+        view  = TeamsConfirmView(self, match)
+        msg   = await thread.send(embed=embed, view=view)
+        match.thread_message = msg
+
+    def _build_teams_confirm_embed(self, match):
+        qt = match.queue_type
+        e  = discord.Embed(
+            title=f"✅ Draft Complete — {qt.upper()}",
+            description=(
+                "Teams are set! Swap players if needed, then confirm to proceed to civ selection. "
+                "**Captains cannot be swapped.**"
+            ),
+            color=0x2ECC71,
+            timestamp=datetime.now(timezone.utc),
+        )
+        t1_lines = []
+        for p in match.team1:
+            cap_tag = " 👑" if p == match.captain1 else ""
+            t1_lines.append(f"{p.display_name}{cap_tag}")
+        e.add_field(name="🔴 Team 1", value="\n".join(t1_lines), inline=True)
+
+        t2_lines = []
+        for p in match.team2:
+            cap_tag = " 👑" if p == match.captain2 else ""
+            t2_lines.append(f"{p.display_name}{cap_tag}")
+        e.add_field(name="🔵 Team 2", value="\n".join(t2_lines), inline=True)
+        e.set_footer(text=f"Match #{match.match_id} • Swap players or confirm teams")
+        return e
+
+    async def show_swap_team1_select(self, interaction, match):
+        e = discord.Embed(
+            title="🔄 Swap Players — Step 1",
+            description="Select the player from **Team 1** you want to swap. Captains are not swappable.",
+            color=0x95A5A6)
+        view = SwapTeam1SelectView(self, match)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=e, view=view)
+
+    async def show_swap_team2_select(self, interaction, match, p1):
+        e = discord.Embed(
+            title="🔄 Swap Players — Step 2",
+            description=f"Swapping **{p1.display_name}** (Team 1) with... Select the player from **Team 2**.",
+            color=0x95A5A6)
+        view = SwapTeam2SelectView(self, match, p1)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=e, view=view)
 
     async def _show_civ_select_fresh(self, guild, match, thread):
         match.phase = "civ_select"
@@ -1691,6 +1876,118 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         e.set_footer(text=f"Done by {interaction.user.display_name}")
         await interaction.followup.send(embed=e, ephemeral=True)
         await self._update_leaderboard(interaction.guild)
+
+
+    @discord.app_commands.command(
+        name="aoe_changeplayer",
+        description="Replace a player in an active match (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches)",
+        old_player="Player to remove from the match",
+        new_player="Player to add to the match",
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_changeplayer(self, interaction: discord.Interaction,
+                                match_id: int,
+                                old_player: discord.Member,
+                                new_player: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        gid   = str(guild.id)
+        match = self._find_match_by_id(guild, match_id)
+
+        if not match:
+            await interaction.followup.send(
+                f"❌ No active match with ID **#{match_id}**. Use `/aoe_listmatches`.",
+                ephemeral=True)
+            return
+
+        if old_player not in match.all_players:
+            await interaction.followup.send(
+                f"❌ **{old_player.display_name}** is not in match **#{match_id}**.",
+                ephemeral=True)
+            return
+
+        if new_player in match.all_players:
+            await interaction.followup.send(
+                f"❌ **{new_player.display_name}** is already in this match!",
+                ephemeral=True)
+            return
+
+        # Find which team old_player is in
+        team_num = match.team_of(old_player)
+        team     = match.team1 if team_num == 1 else match.team2
+        was_captain = (old_player == match.captain1 or old_player == match.captain2)
+
+        # Replace in team list
+        idx = team.index(old_player)
+        team[idx] = new_player
+
+        # Replace in all_players
+        ap_idx = match.all_players.index(old_player)
+        match.all_players[ap_idx] = new_player
+
+        # If old player was captain, new player becomes captain
+        if old_player == match.captain1:
+            match.captain1 = new_player
+        elif old_player == match.captain2:
+            match.captain2 = new_player
+
+        # Handle VC moves if in civ select or in_match phase
+        if match.phase in ("civ_select", "in_match", "pre_match"):
+            temp_vc = match.temp_vc1 if team_num == 1 else match.temp_vc2
+            # Move old player out of temp VC
+            old_member = guild.get_member(old_player.id)
+            if old_member and old_member.voice and temp_vc and old_member.voice.channel == temp_vc:
+                try:
+                    await old_member.move_to(None)  # disconnect from temp VC
+                except Exception:
+                    pass
+            # Move new player into temp VC
+            new_member = guild.get_member(new_player.id)
+            if new_member and new_member.voice and temp_vc:
+                try:
+                    await new_member.move_to(temp_vc)
+                except Exception:
+                    pass
+
+        # Transfer civ pick if old player had one
+        if old_player.id in match.civ_picks:
+            match.civ_picks[new_player.id] = match.civ_picks.pop(old_player.id)
+
+        # Update thread name if captain changed
+        if was_captain and match.thread:
+            try:
+                await match.thread.edit(name=match.thread_name())
+            except Exception:
+                pass
+
+        # Notify in thread
+        if match.thread:
+            try:
+                cap_note = " (now captain)" if was_captain else ""
+                await match.thread.send(
+                    f"🔄 **{old_player.display_name}** has been replaced by **{new_player.mention}** in Team {team_num}{cap_note}. Done by {interaction.user.mention}"
+                )
+            except Exception:
+                pass
+
+        logger.info("[%s] Admin %s replaced %s with %s in match #%s team %s",
+                    guild.id, interaction.user.display_name,
+                    old_player.display_name, new_player.display_name,
+                    match_id, team_num)
+
+        e = discord.Embed(title="✅ Player Changed", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID",   value=f"#{match_id}",              inline=True)
+        e.add_field(name="👥 Team",       value=f"Team {team_num}",          inline=True)
+        e.add_field(name="➖ Removed",     value=old_player.display_name,     inline=True)
+        e.add_field(name="➕ Added",       value=new_player.display_name,     inline=True)
+        if was_captain:
+            e.add_field(name="👑 Captain", value=f"{new_player.display_name} is now captain", inline=False)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
 
 
 async def setup(bot):
