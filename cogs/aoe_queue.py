@@ -559,8 +559,11 @@ class MapVetoView(discord.ui.View):
                 row=i // 3,
             )
             async def callback(interaction: discord.Interaction, m=map_name):
+                # Only the CURRENT banner (or an admin override) may ban — being
+                # the OTHER captain does not grant turn-bypass here, unlike
+                # Start/Cancel/Victory which any captain can trigger.
                 if interaction.user.id != self.match.current_map_banner().id and \
-                   not self.cog._is_captain_or_admin(interaction.user, self.match):
+                   not self.cog._is_admin(interaction.user):
                     await interaction.response.send_message("❌ It's not your turn to ban!", ephemeral=True)
                     return
                 self.match.ban_map(self.match.current_map_banner(), m)
