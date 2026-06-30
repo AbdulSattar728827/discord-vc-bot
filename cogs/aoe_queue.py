@@ -1509,10 +1509,23 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
         await asyncio.sleep(3)
         match.phase = "civ_select"
-        embed = self._build_civ_status_embed(match.thread.guild, match)
+        guild = match.thread.guild
+
+        # Create temp VCs and move players — was missing for the 1v1 ban flow
+        await self._create_temp_vcs(guild, match)
+
+        embed = self._build_civ_status_embed(guild, match)
         view  = CivSelectView(self, match)
         msg   = await match.thread.send(embed=embed, view=view)
         match.thread_message = msg
+
+        if match.temp_vc1 and match.temp_vc2:
+            await match.thread.send(
+                f"🔊 Two VCs created for this match!\n"
+                f"**Team 1:** {match.temp_vc1.mention}\n"
+                f"**Team 2:** {match.temp_vc2.mention}\n"
+                f"Everyone moves to **{AOE_GENERAL_VC_NAME}** when match ends."
+            )
 
     # ── Coin flip ──────────────────────────────────────────────────────────────
 
