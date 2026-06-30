@@ -63,6 +63,11 @@ AOE_CIVS = [
     ("Zhu Xi's Legacy",      "aoe_zhu_xi"),
 ]
 
+MAP_POOL = [
+    "African Waters", "Archipelago", "Dry Arabia", "Forts", "Gorge",
+    "Hedgemaze", "Rocky River", "Sunkenlands", "West Lake",
+]
+
 WIN_COINS           = 5
 PRIVILEGED_ROLES    = {"👑 Grandmaster", "👑 King", "🔨 Moderator"}  # Can control match buttons
 RESULT_DISPLAY_SECS = 30
@@ -107,6 +112,18 @@ class MatchState:
         self.cap2_locked       = False
         self.temp_vc1          = None
         self.temp_vc2          = None
+
+        # 1v1 specific: map veto
+        self.map_pool          = MAP_POOL.copy()
+        self.map_ban_order     = None   # 1 or 2 — who bans first
+        self.map_bans: list    = []     # [(banned_by_player, map_name), ...]
+        self.final_map         = None
+
+        # 1v1 specific: civ ban (each player bans 1 civ for the OTHER)
+        self.civ_ban_p1_choice = None   # civ captain1 bans for captain2
+        self.civ_ban_p2_choice = None   # civ captain2 bans for captain1
+        self.civ_ban_p1_locked = False
+        self.civ_ban_p2_locked = False
 
     @property
     def civs_revealed(self):
@@ -198,6 +215,38 @@ class MatchState:
         if member in self.team1: return 1
         if member in self.team2: return 2
         return None
+
+    # ── 1v1 Map Veto helpers ──────────────────────────────────────────────────
+
+    def current_map_banner(self):
+        """Returns which player (1 or 2 -> captain) should ban next."""
+        if len(self.map_pool) <= 1:
+            return None
+        ban_count = len(self.map_bans)
+        starter = self.map_ban_order  # 1 or 2
+        turn = (starter - 1 + ban_count) % 2  # alternate
+        return self.captain1 if turn == 0 else self.captain2
+
+    def ban_map(self, banner, map_name):
+        self.map_pool.remove(map_name)
+        self.map_bans.append((banner, map_name))
+        if len(self.map_pool) == 1:
+            self.final_map = self.map_pool[0]
+
+    # ── 1v1 Civ Ban helpers ───────────────────────────────────────────────────
+
+    def banned_civs_for(self, player):
+        """Civs banned FOR this player (they cannot pick these)."""
+        banned = []
+        if player == self.captain1 and self.civ_ban_p2_choice:
+            banned.append(self.civ_ban_p2_choice)
+        if player == self.captain2 and self.civ_ban_p1_choice:
+            banned.append(self.civ_ban_p1_choice)
+        return banned
+
+    @property
+    def civ_bans_locked(self):
+        return self.civ_ban_p1_locked and self.civ_ban_p2_locked
 
 
 # ── Queue View ─────────────────────────────────────────────────────────────────
@@ -434,6 +483,207 @@ class ChangeCaptainView(discord.ui.View):
         self.add_item(back_btn)
 
 
+# ── 1v1 Map Veto Coin Flip View ────────────────────────────────────────────────
+
+class MapVetoCoinFlipView(discord.ui.View):
+    def __init__(self, cog, match: MatchState, flipper):
+        super().__init__(timeout=120)
+        self.cog     = cog
+        self.match   = match
+        self.flipper = flipper
+
+    @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary)
+    async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.flipper.id and \
+           not self.cog._is_captain_or_admin(interaction.user, self.match):
+            await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
+            return
+        await self.cog.resolve_map_veto_flip(interaction, self.match, "heads")
+        self.stop()
+
+    @discord.ui.button(label="🪙 Tails", style=discord.ButtonStyle.primary)
+    async def tails(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.flipper.id and \
+           not self.cog._is_captain_or_admin(interaction.user, self.match):
+            await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
+            return
+        await self.cog.resolve_map_veto_flip(interaction, self.match, "tails")
+        self.stop()
+
+
+class MapVetoOrderChoiceView(discord.ui.View):
+    """Coin flip winner chooses to ban first or second in map veto."""
+    def __init__(self, cog, match: MatchState, winner):
+        super().__init__(timeout=120)
+        self.cog    = cog
+        self.match  = match
+        self.winner = winner
+
+    @discord.ui.button(label="🥇 Ban First", style=discord.ButtonStyle.success)
+    async def ban_first(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.winner.id and \
+           not self.cog._is_captain_or_admin(interaction.user, self.match):
+            await interaction.response.send_message("❌ Only the flip winner can choose!", ephemeral=True)
+            return
+        self.match.map_ban_order = self.match.team_of(self.winner)
+        await self.cog.show_map_veto(interaction, self.match)
+        self.stop()
+
+    @discord.ui.button(label="🥈 Ban Second", style=discord.ButtonStyle.secondary)
+    async def ban_second(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.winner.id and \
+           not self.cog._is_captain_or_admin(interaction.user, self.match):
+            await interaction.response.send_message("❌ Only the flip winner can choose!", ephemeral=True)
+            return
+        winner_team = self.match.team_of(self.winner)
+        self.match.map_ban_order = 2 if winner_team == 1 else 1
+        await self.cog.show_map_veto(interaction, self.match)
+        self.stop()
+
+
+# ── 1v1 Map Veto View ──────────────────────────────────────────────────────────
+
+class MapVetoView(discord.ui.View):
+    def __init__(self, cog, match: MatchState):
+        super().__init__(timeout=180)
+        self.cog   = cog
+        self.match = match
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        for i, map_name in enumerate(self.match.map_pool):
+            btn = discord.ui.Button(
+                label=map_name,
+                style=discord.ButtonStyle.danger,
+                row=i // 3,
+            )
+            async def callback(interaction: discord.Interaction, m=map_name):
+                if interaction.user.id != self.match.current_map_banner().id and \
+                   not self.cog._is_captain_or_admin(interaction.user, self.match):
+                    await interaction.response.send_message("❌ It's not your turn to ban!", ephemeral=True)
+                    return
+                self.match.ban_map(self.match.current_map_banner(), m)
+                if self.match.final_map:
+                    await self.cog.show_civ_ban(interaction, self.match)
+                else:
+                    await self.cog.show_map_veto(interaction, self.match)
+            btn.callback = callback
+            self.add_item(btn)
+
+
+# ── 1v1 Civ Ban View ───────────────────────────────────────────────────────────
+
+class CivBanView(discord.ui.View):
+    def __init__(self, cog, match: MatchState):
+        super().__init__(timeout=180)
+        self.cog   = cog
+        self.match = match
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+
+        def make_options(guild):
+            options = []
+            for civ_name, emoji_name in AOE_CIVS:
+                if civ_name == "🎲 Random":
+                    continue
+                emoji = discord.utils.get(guild.emojis, name=emoji_name) if guild else None
+                options.append(discord.SelectOption(label=civ_name, value=civ_name, emoji=emoji))
+            return options
+
+        guild = self.match.thread.guild if self.match.thread else None
+        opts  = make_options(guild)
+
+        ban1_select = discord.ui.Select(
+            placeholder=f"{self.match.captain1.display_name}: Ban a civ for opponent..."
+                        if not self.match.civ_ban_p1_locked else "✅ Locked in",
+            options=opts,
+            disabled=self.match.civ_ban_p1_locked,
+            row=0,
+        )
+        async def on_ban1(interaction: discord.Interaction):
+            if interaction.user.id != self.match.captain1.id:
+                await interaction.response.send_message("❌ Only Player 1 can set this ban!", ephemeral=True)
+                return
+            self.match.civ_ban_p1_choice = ban1_select.values[0]
+            await interaction.response.send_message(
+                f"✅ You banned **{ban1_select.values[0]}** for your opponent!", ephemeral=True)
+            await self.cog._refresh_civ_ban(self.match)
+        ban1_select.callback = on_ban1
+        self.add_item(ban1_select)
+
+        ban2_select = discord.ui.Select(
+            placeholder=f"{self.match.captain2.display_name}: Ban a civ for opponent..."
+                        if not self.match.civ_ban_p2_locked else "✅ Locked in",
+            options=opts,
+            disabled=self.match.civ_ban_p2_locked,
+            row=1,
+        )
+        async def on_ban2(interaction: discord.Interaction):
+            if interaction.user.id != self.match.captain2.id:
+                await interaction.response.send_message("❌ Only Player 2 can set this ban!", ephemeral=True)
+                return
+            self.match.civ_ban_p2_choice = ban2_select.values[0]
+            await interaction.response.send_message(
+                f"✅ You banned **{ban2_select.values[0]}** for your opponent!", ephemeral=True)
+            await self.cog._refresh_civ_ban(self.match)
+        ban2_select.callback = on_ban2
+        self.add_item(ban2_select)
+
+        lock1_btn = discord.ui.Button(
+            label="🔒 Lock Ban (P1)" if not self.match.civ_ban_p1_locked else "✅ P1 Locked",
+            style=discord.ButtonStyle.success if not self.match.civ_ban_p1_locked else discord.ButtonStyle.secondary,
+            disabled=self.match.civ_ban_p1_locked or self.match.civ_ban_p1_choice is None,
+            row=2,
+        )
+        async def lock1(interaction: discord.Interaction):
+            if interaction.user.id != self.match.captain1.id:
+                await interaction.response.send_message("❌ Only Player 1 can lock!", ephemeral=True)
+                return
+            if not self.match.civ_ban_p1_choice:
+                await interaction.response.send_message("❌ Pick a civ to ban first!", ephemeral=True)
+                return
+            self.match.civ_ban_p1_locked = True
+            await interaction.response.send_message("✅ Your ban is locked in!", ephemeral=True)
+            await self.cog._refresh_civ_ban(self.match)
+            if self.match.civ_bans_locked:
+                await self.cog._proceed_to_civ_select_after_ban(self.match)
+        lock1_btn.callback = lock1
+        self.add_item(lock1_btn)
+
+        lock2_btn = discord.ui.Button(
+            label="🔒 Lock Ban (P2)" if not self.match.civ_ban_p2_locked else "✅ P2 Locked",
+            style=discord.ButtonStyle.primary if not self.match.civ_ban_p2_locked else discord.ButtonStyle.secondary,
+            disabled=self.match.civ_ban_p2_locked or self.match.civ_ban_p2_choice is None,
+            row=2,
+        )
+        async def lock2(interaction: discord.Interaction):
+            if interaction.user.id != self.match.captain2.id:
+                await interaction.response.send_message("❌ Only Player 2 can lock!", ephemeral=True)
+                return
+            if not self.match.civ_ban_p2_choice:
+                await interaction.response.send_message("❌ Pick a civ to ban first!", ephemeral=True)
+                return
+            self.match.civ_ban_p2_locked = True
+            await interaction.response.send_message("✅ Your ban is locked in!", ephemeral=True)
+            await self.cog._refresh_civ_ban(self.match)
+            if self.match.civ_bans_locked:
+                await self.cog._proceed_to_civ_select_after_ban(self.match)
+        lock2_btn.callback = lock2
+        self.add_item(lock2_btn)
+
+        cancel_btn = discord.ui.Button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger, row=3)
+        async def cancel(interaction: discord.Interaction):
+            if not self.cog._is_captain_or_admin(interaction.user, self.match):
+                await interaction.response.send_message("❌ Not your match!", ephemeral=True)
+                return
+            await self.cog.cancel_match(interaction, self.match)
+        cancel_btn.callback = cancel
+        self.add_item(cancel_btn)
+
+
 # ── Civ Select View ────────────────────────────────────────────────────────────
 
 class CivSelectView(discord.ui.View):
@@ -446,11 +696,13 @@ class CivSelectView(discord.ui.View):
     def _build(self):
         self.clear_items()
 
-        def make_civ_options(guild):
+        def make_civ_options(guild, exclude_civs=None):
+            exclude_civs = exclude_civs or []
             options = []
             for civ_name, emoji_name in AOE_CIVS:
-                # Try to find the custom emoji in the guild
-                emoji = discord.utils.get(guild.emojis, name=emoji_name)
+                if civ_name in exclude_civs:
+                    continue
+                emoji = discord.utils.get(guild.emojis, name=emoji_name) if guild else None
                 options.append(discord.SelectOption(
                     label=civ_name,
                     value=civ_name,
@@ -458,34 +710,71 @@ class CivSelectView(discord.ui.View):
                 ))
             return options
 
-        guild = None
-        if hasattr(self, 'match') and self.match.thread:
-            guild = self.match.thread.guild
+        guild = self.match.thread.guild if self.match.thread else None
 
-        civ_select = discord.ui.Select(
-            placeholder="🎭 Pick your civilization...",
-            options=make_civ_options(guild) if guild else [
-                discord.SelectOption(label=civ_name, value=civ_name)
-                for civ_name, _ in AOE_CIVS
-            ],
-            row=0,
-        )
-        async def on_civ_select(interaction: discord.Interaction):
-            if interaction.user not in self.match.all_players:
-                await interaction.response.send_message("❌ You're not in this match!", ephemeral=True)
-                return
-            chosen = civ_select.values[0]
-            self.match.civ_picks[interaction.user.id] = chosen
-            await interaction.response.send_message(
-                f"✅ You picked **{chosen}**! You can change it anytime before lock-in.", ephemeral=True)
-            await self.cog._refresh_civ_status(self.match)
-        civ_select.callback = on_civ_select
-        self.add_item(civ_select)
+        if self.match.queue_type == "1v1":
+            # Separate dropdown per player, filtering out civs banned for them
+            p1_banned = self.match.banned_civs_for(self.match.captain1)
+            p2_banned = self.match.banned_civs_for(self.match.captain2)
+
+            p1_select = discord.ui.Select(
+                placeholder=f"{self.match.captain1.display_name}: Pick your civilization...",
+                options=make_civ_options(guild, exclude_civs=p1_banned),
+                row=0,
+            )
+            async def on_p1_select(interaction: discord.Interaction):
+                if interaction.user.id != self.match.captain1.id:
+                    await interaction.response.send_message("❌ This isn't your dropdown!", ephemeral=True)
+                    return
+                chosen = p1_select.values[0]
+                self.match.civ_picks[interaction.user.id] = chosen
+                await interaction.response.send_message(
+                    f"✅ You picked **{chosen}**! You can change it anytime before lock-in.", ephemeral=True)
+                await self.cog._refresh_civ_status(self.match)
+            p1_select.callback = on_p1_select
+            self.add_item(p1_select)
+
+            p2_select = discord.ui.Select(
+                placeholder=f"{self.match.captain2.display_name}: Pick your civilization...",
+                options=make_civ_options(guild, exclude_civs=p2_banned),
+                row=1,
+            )
+            async def on_p2_select(interaction: discord.Interaction):
+                if interaction.user.id != self.match.captain2.id:
+                    await interaction.response.send_message("❌ This isn't your dropdown!", ephemeral=True)
+                    return
+                chosen = p2_select.values[0]
+                self.match.civ_picks[interaction.user.id] = chosen
+                await interaction.response.send_message(
+                    f"✅ You picked **{chosen}**! You can change it anytime before lock-in.", ephemeral=True)
+                await self.cog._refresh_civ_status(self.match)
+            p2_select.callback = on_p2_select
+            self.add_item(p2_select)
+        else:
+            civ_select = discord.ui.Select(
+                placeholder="🎭 Pick your civilization...",
+                options=make_civ_options(guild),
+                row=0,
+            )
+            async def on_civ_select(interaction: discord.Interaction):
+                if interaction.user not in self.match.all_players:
+                    await interaction.response.send_message("❌ You're not in this match!", ephemeral=True)
+                    return
+                chosen = civ_select.values[0]
+                self.match.civ_picks[interaction.user.id] = chosen
+                await interaction.response.send_message(
+                    f"✅ You picked **{chosen}**! You can change it anytime before lock-in.", ephemeral=True)
+                await self.cog._refresh_civ_status(self.match)
+            civ_select.callback = on_civ_select
+            self.add_item(civ_select)
+
+        lock_row    = 2 if self.match.queue_type == "1v1" else 1
+        cancel_row  = 3 if self.match.queue_type == "1v1" else 2
 
         lock1_btn = discord.ui.Button(
             label="🔒 Lock In Civs (Team 1)" if not self.match.cap1_locked else "✅ Team 1 Locked",
             style=discord.ButtonStyle.success if not self.match.cap1_locked else discord.ButtonStyle.secondary,
-            disabled=self.match.cap1_locked, row=1)
+            disabled=self.match.cap1_locked, row=lock_row)
         async def lock1(interaction: discord.Interaction):
             if interaction.user.id != self.match.captain1.id:
                 await interaction.response.send_message("❌ Only Team 1's captain can lock in!", ephemeral=True)
@@ -506,7 +795,7 @@ class CivSelectView(discord.ui.View):
         lock2_btn = discord.ui.Button(
             label="🔒 Lock In Civs (Team 2)" if not self.match.cap2_locked else "✅ Team 2 Locked",
             style=discord.ButtonStyle.primary if not self.match.cap2_locked else discord.ButtonStyle.secondary,
-            disabled=self.match.cap2_locked, row=1)
+            disabled=self.match.cap2_locked, row=lock_row)
         async def lock2(interaction: discord.Interaction):
             if interaction.user.id != self.match.captain2.id:
                 await interaction.response.send_message("❌ Only Team 2's captain can lock in!", ephemeral=True)
@@ -524,7 +813,7 @@ class CivSelectView(discord.ui.View):
         lock2_btn.callback = lock2
         self.add_item(lock2_btn)
 
-        cancel_btn = discord.ui.Button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger, row=2)
+        cancel_btn = discord.ui.Button(label="🚫 Cancel Match", style=discord.ButtonStyle.danger, row=cancel_row)
         async def cancel(interaction: discord.Interaction):
             if not self.cog._is_captain_or_admin(interaction.user, self.match):
                 await interaction.response.send_message("❌ Not your match!", ephemeral=True)
@@ -1095,10 +1384,135 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
         if queue_type == "1v1":
             match.draft_complete = True
-            match.phase = "civ_select"
-            await self._show_civ_select_fresh(guild, match, thread)
+            match.phase = "map_veto_coinflip"
+            await self._show_map_veto_coinflip(guild, match, thread)
         else:
             await self._show_coin_flip(guild, match, thread)
+
+    # ── 1v1 Map Veto Coin Flip ─────────────────────────────────────────────────
+
+    async def _show_map_veto_coinflip(self, guild, match, thread):
+        flipper = match.captain1
+        e = discord.Embed(
+            title="🪙 Map Veto — Coin Flip!",
+            description=(
+                f"{flipper.mention} — you're flipping the coin!\n\n"
+                f"**Player 1:** {match.captain1.mention}\n"
+                f"**Player 2:** {match.captain2.mention}\n\n"
+                f"Winner chooses to **ban first** or **ban second** in the map veto."
+            ),
+            color=0xF1C40F,
+            timestamp=datetime.now(timezone.utc),
+        )
+        view = MapVetoCoinFlipView(self, match, flipper)
+        msg  = await thread.send(embed=e, view=view)
+        match.thread_message = msg
+
+    async def resolve_map_veto_flip(self, interaction, match, choice):
+        result = random.choice(["heads", "tails"])
+        won    = choice == result
+        winner = match.captain1 if won else match.captain2
+
+        e = discord.Embed(
+            title=f"🪙 Coin landed on **{result.upper()}**!",
+            description=f"{winner.mention} **won the flip!**\n\nChoose your map ban order:",
+            color=0xF1C40F, timestamp=datetime.now(timezone.utc))
+        view = MapVetoOrderChoiceView(self, match, winner)
+        await interaction.response.edit_message(embed=e, view=view)
+
+    # ── 1v1 Map Veto ───────────────────────────────────────────────────────────
+
+    async def show_map_veto(self, interaction, match):
+        match.phase = "map_veto"
+        embed = self._build_map_veto_embed(match)
+        view  = MapVetoView(self, match)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    def _build_map_veto_embed(self, match):
+        banner = match.current_map_banner()
+        e = discord.Embed(
+            title="🗺️ Map Veto",
+            description="Take turns banning maps until only **1 remains**.",
+            color=0xE74C3C,
+            timestamp=datetime.now(timezone.utc),
+        )
+        e.add_field(
+            name=f"🗺️ Remaining Maps ({len(match.map_pool)})",
+            value="\n".join(f"• {m}" for m in match.map_pool) or "—",
+            inline=True,
+        )
+        if match.map_bans:
+            ban_lines = [f"❌ {m} (by {p.display_name})" for p, m in match.map_bans]
+            e.add_field(name="🚫 Banned Maps", value="\n".join(ban_lines), inline=True)
+        e.set_footer(text=f"👑 {banner.display_name}'s turn to ban | Match #{match.match_id}")
+        return e
+
+    # ── 1v1 Civ Ban ────────────────────────────────────────────────────────────
+
+    async def show_civ_ban(self, interaction, match):
+        match.phase = "civ_ban"
+        embed = self._build_civ_ban_embed(match)
+        view  = CivBanView(self, match)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    def _build_civ_ban_embed(self, match):
+        e = discord.Embed(
+            title="🚫 Civilization Ban Phase",
+            description=(
+                f"🗺️ **Map:** {match.final_map}\n\n"
+                "Each player bans **1 civilization** the *other* player cannot pick.\n"
+                "Bans are hidden until both players lock in."
+            ),
+            color=0x992D22,
+            timestamp=datetime.now(timezone.utc),
+        )
+        p1_status = "✅ Locked" if match.civ_ban_p1_locked else (
+            "⏳ Chosen, not locked" if match.civ_ban_p1_choice else "⏳ Choosing...")
+        p2_status = "✅ Locked" if match.civ_ban_p2_locked else (
+            "⏳ Chosen, not locked" if match.civ_ban_p2_choice else "⏳ Choosing...")
+        e.add_field(name=f"Player 1 — {match.captain1.display_name}", value=p1_status, inline=True)
+        e.add_field(name=f"Player 2 — {match.captain2.display_name}", value=p2_status, inline=True)
+        e.set_footer(text=f"Match #{match.match_id} • Bans revealed when both lock in")
+        return e
+
+    async def _refresh_civ_ban(self, match):
+        if not match.thread_message or not match.thread:
+            return
+        try:
+            embed = self._build_civ_ban_embed(match)
+            view  = CivBanView(self, match)
+            await match.thread_message.edit(embed=embed, view=view)
+        except Exception as ex:
+            logger.warning("Could not refresh civ ban status: %s", ex)
+
+    async def _proceed_to_civ_select_after_ban(self, match):
+        """Both civ bans locked — reveal bans, then move to civ selection."""
+        if not match.thread:
+            return
+        e = discord.Embed(
+            title="🚫 Civilizations Banned!",
+            description=f"🗺️ **Map:** {match.final_map}",
+            color=0x992D22,
+            timestamp=datetime.now(timezone.utc),
+        )
+        e.add_field(
+            name=f"{match.captain1.display_name} banned for {match.captain2.display_name}",
+            value=f"**{match.civ_ban_p1_choice}**", inline=True)
+        e.add_field(
+            name=f"{match.captain2.display_name} banned for {match.captain1.display_name}",
+            value=f"**{match.civ_ban_p2_choice}**", inline=True)
+        e.set_footer(text=f"Match #{match.match_id} • Moving to civ selection...")
+        try:
+            await match.thread_message.edit(embed=e, view=None)
+        except Exception:
+            pass
+
+        await asyncio.sleep(3)
+        match.phase = "civ_select"
+        embed = self._build_civ_status_embed(match.thread.guild, match)
+        view  = CivSelectView(self, match)
+        msg   = await match.thread.send(embed=embed, view=view)
+        match.thread_message = msg
 
     # ── Coin flip ──────────────────────────────────────────────────────────────
 
@@ -1479,6 +1893,23 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
             title=f"📜 Match #{match.match_id} — {qt.upper()} | {result}",
             color=0xFFD700 if "Victory" in result else 0x95A5A6,
             timestamp=datetime.now(timezone.utc))
+
+        # Show map played (1v1 only, if map veto completed)
+        if qt == "1v1" and getattr(match, "final_map", None):
+            e.add_field(name="🗺️ Map Played", value=f"**{match.final_map}**", inline=False)
+
+        # Show civ bans (1v1 only, if civ ban phase completed)
+        if qt == "1v1" and (match.civ_ban_p1_choice or match.civ_ban_p2_choice):
+            ban_lines = []
+            if match.civ_ban_p1_choice:
+                ban_lines.append(
+                    f"{match.captain1.display_name} banned **{match.civ_ban_p1_choice}** "
+                    f"(for {match.captain2.display_name})")
+            if match.civ_ban_p2_choice:
+                ban_lines.append(
+                    f"{match.captain2.display_name} banned **{match.civ_ban_p2_choice}** "
+                    f"(for {match.captain1.display_name})")
+            e.add_field(name="🚫 Civ Bans", value="\n".join(ban_lines), inline=False)
 
         t1_lines = []
         for p in match.team1:
