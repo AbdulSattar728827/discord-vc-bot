@@ -291,7 +291,7 @@ class CoinFlipView(discord.ui.View):
 
     @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary)
     async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.flipper.id and            not self.cog._is_captain_or_admin(interaction.user, self.match):
+        if interaction.user.id != self.flipper.id and not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
             return
         await self.cog.resolve_flip(interaction, self.match, "heads")
@@ -299,7 +299,7 @@ class CoinFlipView(discord.ui.View):
 
     @discord.ui.button(label="🪙 Tails", style=discord.ButtonStyle.primary)
     async def tails(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.flipper.id and            not self.cog._is_captain_or_admin(interaction.user, self.match):
+        if interaction.user.id != self.flipper.id and not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
             return
         await self.cog.resolve_flip(interaction, self.match, "tails")
@@ -317,7 +317,7 @@ class FirstPickView(discord.ui.View):
 
     @discord.ui.button(label="⚡ First Pick", style=discord.ButtonStyle.success)
     async def first(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.winner.id and            not self.cog._is_captain_or_admin(interaction.user, self.match):
+        if interaction.user.id != self.winner.id and not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the flip winner can choose!", ephemeral=True)
             return
         self.match.first_pick_team = self.match.team_of(self.winner)
@@ -327,7 +327,7 @@ class FirstPickView(discord.ui.View):
 
     @discord.ui.button(label="🛡️ Second Pick", style=discord.ButtonStyle.secondary)
     async def second(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.winner.id and            not self.cog._is_captain_or_admin(interaction.user, self.match):
+        if interaction.user.id != self.winner.id and not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the flip winner can choose!", ephemeral=True)
             return
         team = self.match.team_of(self.winner)
@@ -379,7 +379,7 @@ class DraftView(discord.ui.View):
                                       row=cap_row, disabled=cap1_disabled)
         async def change_cap1(interaction: discord.Interaction):
             is_team1_cap = interaction.user.id == self.match.captain1.id
-            is_privileged = self.cog._is_captain_or_admin(interaction.user, self.match)
+            is_privileged = self.cog._is_admin_or_privileged(interaction.user)
             if not is_team1_cap and not is_privileged:
                 await interaction.response.send_message(
                     "❌ Only Team 1's captain or an admin can do this!", ephemeral=True)
@@ -397,7 +397,7 @@ class DraftView(discord.ui.View):
                                       row=cap_row, disabled=cap2_disabled)
         async def change_cap2(interaction: discord.Interaction):
             is_team2_cap = interaction.user.id == self.match.captain2.id
-            is_privileged = self.cog._is_captain_or_admin(interaction.user, self.match)
+            is_privileged = self.cog._is_admin_or_privileged(interaction.user)
             if not is_team2_cap and not is_privileged:
                 await interaction.response.send_message(
                     "❌ Only Team 2's captain or an admin can do this!", ephemeral=True)
@@ -424,9 +424,11 @@ class ChangeCaptainView(discord.ui.View):
         super().__init__(timeout=60)
         self.cog   = cog
         self.match = match
+        self.team  = team
 
         team_members = match.team1 if team == 1 else match.team2
         current_cap  = match.captain1 if team == 1 else match.captain2
+        self.current_cap_id = current_cap.id  # snapshot — who is allowed to act here
 
         # Options: undrafted pool players + already drafted team members (except current cap)
         # Players already drafted into the OTHER team are excluded
@@ -448,6 +450,17 @@ class ChangeCaptainView(discord.ui.View):
                 options=select_opts,
             )
             async def on_select(interaction: discord.Interaction):
+                # Re-verify: only THIS team's captain (or admin/privileged) may complete
+                # the swap — the entry button check alone isn't enough since this is a
+                # separate interaction on a separate component.
+                is_this_team_cap = interaction.user.id == self.current_cap_id
+                is_privileged     = self.cog._is_admin_or_privileged(interaction.user)
+                if not is_this_team_cap and not is_privileged:
+                    await interaction.response.send_message(
+                        f"❌ Only Team {self.team}'s captain or an admin can do this!",
+                        ephemeral=True)
+                    return
+
                 new_id  = int(select.values[0])
                 # Search in both pool and team
                 new_cap = discord.utils.get(all_options, id=new_id)
@@ -495,7 +508,7 @@ class MapVetoCoinFlipView(discord.ui.View):
     @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary)
     async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.flipper.id and \
-           not self.cog._is_captain_or_admin(interaction.user, self.match):
+           not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
             return
         await self.cog.resolve_map_veto_flip(interaction, self.match, "heads")
@@ -504,7 +517,7 @@ class MapVetoCoinFlipView(discord.ui.View):
     @discord.ui.button(label="🪙 Tails", style=discord.ButtonStyle.primary)
     async def tails(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.flipper.id and \
-           not self.cog._is_captain_or_admin(interaction.user, self.match):
+           not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
             return
         await self.cog.resolve_map_veto_flip(interaction, self.match, "tails")
@@ -522,7 +535,7 @@ class MapVetoOrderChoiceView(discord.ui.View):
     @discord.ui.button(label="🥇 Ban First", style=discord.ButtonStyle.success)
     async def ban_first(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.winner.id and \
-           not self.cog._is_captain_or_admin(interaction.user, self.match):
+           not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the flip winner can choose!", ephemeral=True)
             return
         self.match.map_ban_order = self.match.team_of(self.winner)
@@ -532,7 +545,7 @@ class MapVetoOrderChoiceView(discord.ui.View):
     @discord.ui.button(label="🥈 Ban Second", style=discord.ButtonStyle.secondary)
     async def ban_second(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.winner.id and \
-           not self.cog._is_captain_or_admin(interaction.user, self.match):
+           not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the flip winner can choose!", ephemeral=True)
             return
         winner_team = self.match.team_of(self.winner)
@@ -879,6 +892,9 @@ class SwapTeam1SelectView(discord.ui.View):
             disabled=not any(p != match.captain1 for p in match.team1),
         )
         async def on_select(interaction: discord.Interaction):
+            if not self.cog._is_captain_or_admin(interaction.user, match):
+                await interaction.response.send_message("❌ Not your match!", ephemeral=True)
+                return
             if select.values[0] == "none":
                 await interaction.response.send_message("❌ No swappable players in Team 1!", ephemeral=True)
                 return
@@ -918,6 +934,9 @@ class SwapTeam2SelectView(discord.ui.View):
             disabled=not any(p != match.captain2 for p in match.team2),
         )
         async def on_select(interaction: discord.Interaction):
+            if not self.cog._is_captain_or_admin(interaction.user, match):
+                await interaction.response.send_message("❌ Not your match!", ephemeral=True)
+                return
             if select.values[0] == "none":
                 await interaction.response.send_message("❌ No swappable players in Team 2!", ephemeral=True)
                 return
@@ -1017,6 +1036,15 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
     def _is_admin(self, member) -> bool:
         return member.guild_permissions.administrator or member.guild_permissions.manage_channels
+
+    def _is_admin_or_privileged(self, member) -> bool:
+        """Admin or Grandmaster/King/Moderator role — NOT 'any captain'.
+        Use this for team-specific overrides (e.g. Change Team 1 Captain)
+        where the OTHER team's captain must not be able to act."""
+        if self._is_admin(member):
+            return True
+        member_role_names = {r.name for r in member.roles}
+        return bool(member_role_names & PRIVILEGED_ROLES)
 
     def _is_captain_or_admin(self, member, match: MatchState) -> bool:
         if self._is_admin(member):
