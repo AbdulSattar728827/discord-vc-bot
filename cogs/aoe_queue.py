@@ -159,57 +159,47 @@ class MatchState:
             self.phase = "teams_confirm"
 
     def replace_captain(self, team, new_captain, from_pool=False):
+        """Replace captain with new_captain.
+        from_pool=True  → new cap was in the undrafted pool
+        from_pool=False → new cap was already on the team
+        In both cases, the OLD captain moves to the pool.
+        """
         if team == 1:
             old = self.captain1
             self.captain1 = new_captain
-            if from_pool:
-                # New cap came from pool — old cap goes back to pool
-                if new_captain in self.remaining:
-                    self.remaining.remove(new_captain)
-                if old not in self.remaining:
-                    self.remaining.append(old)
-                if old in self.team1:
-                    self.team1.remove(old)
-                if new_captain not in self.team1:
-                    self.team1.insert(0, new_captain)
-                else:
-                    self.team1.remove(new_captain)
-                    self.team1.insert(0, new_captain)
-            else:
-                # New cap came from team — old cap stays in team, swaps position
-                if new_captain in self.team1:
-                    self.team1.remove(new_captain)
-                self.team1.insert(0, new_captain)
-                # Old captain moves to pool
-                if old in self.team1:
-                    self.team1.remove(old)
-                if old not in self.remaining:
-                    self.remaining.append(old)
+
+            # Remove new_cap from wherever they currently are
+            if new_captain in self.remaining:
+                self.remaining.remove(new_captain)
+            if new_captain in self.team1:
+                self.team1.remove(new_captain)
+
+            # New cap goes to front of team1
+            self.team1.insert(0, new_captain)
+
+            # Old cap leaves team1 and goes to pool
+            if old in self.team1:
+                self.team1.remove(old)
+            if old not in self.remaining:
+                self.remaining.append(old)
         else:
             old = self.captain2
             self.captain2 = new_captain
-            if from_pool:
-                # New cap came from pool — old cap goes back to pool
-                if new_captain in self.remaining:
-                    self.remaining.remove(new_captain)
-                if old not in self.remaining:
-                    self.remaining.append(old)
-                if old in self.team2:
-                    self.team2.remove(old)
-                if new_captain not in self.team2:
-                    self.team2.insert(0, new_captain)
-                else:
-                    self.team2.remove(new_captain)
-                    self.team2.insert(0, new_captain)
-            else:
-                # New cap came from team — old cap moves to pool
-                if new_captain in self.team2:
-                    self.team2.remove(new_captain)
-                self.team2.insert(0, new_captain)
-                if old in self.team2:
-                    self.team2.remove(old)
-                if old not in self.remaining:
-                    self.remaining.append(old)
+
+            # Remove new_cap from wherever they currently are
+            if new_captain in self.remaining:
+                self.remaining.remove(new_captain)
+            if new_captain in self.team2:
+                self.team2.remove(new_captain)
+
+            # New cap goes to front of team2
+            self.team2.insert(0, new_captain)
+
+            # Old cap leaves team2 and goes to pool
+            if old in self.team2:
+                self.team2.remove(old)
+            if old not in self.remaining:
+                self.remaining.append(old)
 
     def team_of(self, member):
         if member in self.team1: return 1
@@ -288,8 +278,58 @@ class CoinFlipView(discord.ui.View):
         self.cog     = cog
         self.match   = match
         self.flipper = flipper
+        self._add_captain_buttons()
 
-    @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary)
+    def _add_captain_buttons(self):
+        # Replace Team 1 Captain button
+        cap1_btn = discord.ui.Button(
+            label="🔄 Replace Team 1 Captain",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        async def change_cap1(interaction: discord.Interaction):
+            is_team1_cap = interaction.user.id == self.match.captain1.id
+            is_privileged = self.cog._is_admin_or_privileged(interaction.user)
+            if not is_team1_cap and not is_privileged:
+                await interaction.response.send_message(
+                    "❌ Only Team 1's captain or an admin can do this!", ephemeral=True)
+                return
+            await self.cog.show_change_captain_from_flip(interaction, self.match, team=1)
+        cap1_btn.callback = change_cap1
+        self.add_item(cap1_btn)
+
+        # Replace Team 2 Captain button
+        cap2_btn = discord.ui.Button(
+            label="🔄 Replace Team 2 Captain",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        async def change_cap2(interaction: discord.Interaction):
+            is_team2_cap = interaction.user.id == self.match.captain2.id
+            is_privileged = self.cog._is_admin_or_privileged(interaction.user)
+            if not is_team2_cap and not is_privileged:
+                await interaction.response.send_message(
+                    "❌ Only Team 2's captain or an admin can do this!", ephemeral=True)
+                return
+            await self.cog.show_change_captain_from_flip(interaction, self.match, team=2)
+        cap2_btn.callback = change_cap2
+        self.add_item(cap2_btn)
+
+        # Cancel Match button
+        cancel_btn = discord.ui.Button(
+            label="🚫 Cancel Match",
+            style=discord.ButtonStyle.danger,
+            row=2,
+        )
+        async def cancel(interaction: discord.Interaction):
+            if not self.cog._is_captain_or_admin(interaction.user, self.match):
+                await interaction.response.send_message("❌ Not your match!", ephemeral=True)
+                return
+            await self.cog.cancel_match(interaction, self.match)
+        cancel_btn.callback = cancel
+        self.add_item(cancel_btn)
+
+    @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary, row=0)
     async def heads(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.flipper.id and not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
@@ -297,7 +337,7 @@ class CoinFlipView(discord.ui.View):
         await self.cog.resolve_flip(interaction, self.match, "heads")
         self.stop()
 
-    @discord.ui.button(label="🪙 Tails", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🪙 Tails", style=discord.ButtonStyle.primary, row=0)
     async def tails(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.flipper.id and not self.cog._is_admin(interaction.user):
             await interaction.response.send_message("❌ Only the coin flipper can choose!", ephemeral=True)
@@ -374,7 +414,7 @@ class DraftView(discord.ui.View):
         team1_swap_options = [p for p in self.match.remaining] +                              [p for p in self.match.team1 if p != self.match.captain1]
         cap1_disabled = len(team1_swap_options) == 0 or self.match.draft_started
 
-        cap1_btn = discord.ui.Button(label="🔄 Change Team 1 Captain",
+        cap1_btn = discord.ui.Button(label="🔄 Replace Team 1 Captain",
                                       style=discord.ButtonStyle.secondary,
                                       row=cap_row, disabled=cap1_disabled)
         async def change_cap1(interaction: discord.Interaction):
@@ -392,7 +432,7 @@ class DraftView(discord.ui.View):
         team2_swap_options = [p for p in self.match.remaining] +                              [p for p in self.match.team2 if p != self.match.captain2]
         cap2_disabled = len(team2_swap_options) == 0 or self.match.draft_started
 
-        cap2_btn = discord.ui.Button(label="🔄 Change Team 2 Captain",
+        cap2_btn = discord.ui.Button(label="🔄 Replace Team 2 Captain",
                                       style=discord.ButtonStyle.secondary,
                                       row=cap_row, disabled=cap2_disabled)
         async def change_cap2(interaction: discord.Interaction):
@@ -491,6 +531,68 @@ class ChangeCaptainView(discord.ui.View):
         back_btn = discord.ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary)
         async def back(interaction: discord.Interaction):
             await self.cog.show_draft(interaction, match)
+            self.stop()
+        back_btn.callback = back
+        self.add_item(back_btn)
+
+
+# ── Change Captain From Flip View ────────────────────────────────────────────────
+
+class ChangeCaptainFromFlipView(discord.ui.View):
+    """Same as ChangeCaptainView but returns to coin flip screen after swap."""
+    def __init__(self, cog, match: MatchState, team: int):
+        super().__init__(timeout=60)
+        self.cog          = cog
+        self.match        = match
+        self.team         = team
+
+        team_members = match.team1 if team == 1 else match.team2
+        current_cap  = match.captain1 if team == 1 else match.captain2
+        self.current_cap_id = current_cap.id
+
+        # Only team members can be swapped (no pool during coin flip phase)
+        options = [m for m in team_members if m != current_cap]
+
+        if options:
+            select = discord.ui.Select(
+                placeholder=f"Select new Team {team} Captain...",
+                options=[discord.SelectOption(label=m.display_name, value=str(m.id)) for m in options],
+            )
+            async def on_select(interaction: discord.Interaction):
+                is_this_cap  = interaction.user.id == self.current_cap_id
+                is_privileged = self.cog._is_admin_or_privileged(interaction.user)
+                if not is_this_cap and not is_privileged:
+                    await interaction.response.send_message(
+                        f"❌ Only Team {self.team}'s captain or an admin can do this!", ephemeral=True)
+                    return
+                new_id  = int(select.values[0])
+                new_cap = discord.utils.get(options, id=new_id)
+                if not new_cap:
+                    await interaction.response.send_message("❌ Player not found!", ephemeral=True)
+                    return
+                # Swap within team only (no pool during flip phase)
+                match.replace_captain(team, new_cap, from_pool=False)
+                if match.thread:
+                    try:
+                        await match.thread.edit(name=match.thread_name())
+                    except Exception:
+                        pass
+                # Return to coin flip screen with updated captains
+                await self.cog._refresh_coin_flip(interaction, match)
+                self.stop()
+            select.callback = on_select
+            self.add_item(select)
+        else:
+            select = discord.ui.Select(
+                placeholder="No other team members to swap with",
+                options=[discord.SelectOption(label="None", value="none")],
+                disabled=True,
+            )
+            self.add_item(select)
+
+        back_btn = discord.ui.Button(label="↩️ Back", style=discord.ButtonStyle.secondary)
+        async def back(interaction: discord.Interaction):
+            await self.cog._refresh_coin_flip(interaction, match)
             self.stop()
         back_btn.callback = back
         self.add_item(back_btn)
@@ -1618,6 +1720,32 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         e.set_footer(text=f"{footer} | Match #{match.match_id}")
         return e
 
+    async def _refresh_coin_flip(self, interaction, match):
+        """Rebuild and show the coin flip screen after a captain swap."""
+        flipper = match.captain1
+        e = discord.Embed(
+            title="🪙 Coin Flip!",
+            description=(
+                f"{flipper.mention} — you're flipping the coin!\n\n"
+                f"**Team 1 Captain:** {match.captain1.mention}\n"
+                f"**Team 2 Captain:** {match.captain2.mention}\n\n"
+                f"Winner chooses **First Pick** or **Second Pick**."
+            ),
+            color=0xF1C40F, timestamp=datetime.now(timezone.utc))
+        view = CoinFlipView(self, match, flipper)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=e, view=view)
+
+    async def show_change_captain_from_flip(self, interaction, match, team):
+        """Open Change Captain from coin flip phase — returns to coin flip after swap."""
+        e = discord.Embed(
+            title=f"🔄 Replace Team {team} Captain",
+            description="Select a player from your team to become the new captain.\nYou will return to the coin flip after swapping.",
+            color=0x95A5A6)
+        view = ChangeCaptainFromFlipView(self, match, team)
+        await interaction.response.defer()
+        await interaction.message.edit(embed=e, view=view)
+
     async def show_change_captain(self, interaction, match, team):
         e = discord.Embed(title=f"🔄 Change Team {team} Captain",
                           description="Select a player from your team to become the new captain.",
@@ -1713,7 +1841,11 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await self._create_temp_vcs(interaction.guild, match)
         embed = self._build_civ_status_embed(interaction.guild, match)
         view  = CivSelectView(self, match)
-        await interaction.response.edit_message(embed=embed, view=view)
+        # Use defer + message.edit since this may be called from a standalone
+        # thread message (Teams Confirm) rather than an original interaction response
+        await interaction.response.defer()
+        await interaction.message.edit(embed=embed, view=view)
+        match.thread_message = interaction.message
         if match.temp_vc1 and match.temp_vc2 and match.thread:
             await match.thread.send(
                 f"\U0001f509 Two VCs created for this match!\n"
