@@ -519,6 +519,62 @@ class Database:
             """, match_id, result, team1_ids, team2_ids,
                 json.dumps(civ_data or {}))
 
+    async def get_aoe_civ_stats(self, guild_id: str, user_id: str) -> dict:
+        import json
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT result, team1_ids, team2_ids, civ_data
+                FROM aoe_matches
+                WHERE guild_id=$1
+                AND result NOT IN ('pending', 'cancelled')
+                AND (team1_ids @> ARRAY[$2] OR team2_ids @> ARRAY[$2])
+            """, guild_id, user_id)
+            civ_stats = {}
+            for row in rows:
+                raw = row["civ_data"]
+                civ_data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+                civ = civ_data.get(user_id, "Unknown")
+                if civ == "Unknown":
+                    continue
+                if civ not in civ_stats:
+                    civ_stats[civ] = {"wins": 0, "losses": 0}
+                team1_ids = list(row["team1_ids"])
+                result    = row["result"]
+                won = (user_id in team1_ids and result == "team1") or                       (user_id not in team1_ids and result == "team2")
+                if won:
+                    civ_stats[civ]["wins"] += 1
+                else:
+                    civ_stats[civ]["losses"] += 1
+            return civ_stats
+
+    async def get_aoe_h2h(self, guild_id: str, user1_id: str, user2_id: str) -> list:
+        import json
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, queue_type, result, team1_ids, team2_ids, civ_data, finished_at
+                FROM aoe_matches
+                WHERE guild_id=$1
+                AND result NOT IN ('pending', 'cancelled')
+                AND (team1_ids @> ARRAY[$2] OR team2_ids @> ARRAY[$2])
+                AND (team1_ids @> ARRAY[$3] OR team2_ids @> ARRAY[$3])
+                ORDER BY finished_at DESC
+                LIMIT 20
+            """, guild_id, user1_id, user2_id)
+            matches = []
+            for row in rows:
+                raw = row["civ_data"]
+                civ_data = json.loads(raw) if isinstance(raw, str) else dict(raw)
+                matches.append({
+                    "id":         row["id"],
+                    "queue_type": row["queue_type"],
+                    "result":     row["result"],
+                    "team1_ids":  list(row["team1_ids"]),
+                    "team2_ids":  list(row["team2_ids"]),
+                    "civ_data":   civ_data,
+                    "date":       row["finished_at"],
+                })
+            return matches
+
     async def get_aoe_leaderboard(self, guild_id: str, queue_type: str) -> list:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""

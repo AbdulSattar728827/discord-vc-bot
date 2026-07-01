@@ -3192,6 +3192,128 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                     old_cap_name, new_captain.display_name, match_id)
 
 
+    @discord.app_commands.command(
+        name="aoe_civstats",
+        description="Show your civ win/loss stats across all AOE matches.",
+    )
+    @discord.app_commands.describe(member="Member to check (leave blank for yourself)")
+    async def aoe_civstats(self, interaction: discord.Interaction,
+                            member: discord.Member = None):
+        await interaction.response.defer(ephemeral=True)
+        target = member or interaction.user
+        gid    = str(interaction.guild.id)
+        uid    = str(target.id)
+
+        civ_stats = await db.get_aoe_civ_stats(gid, uid)
+
+        if not civ_stats:
+            await interaction.followup.send(
+                f"❌ **{target.display_name}** has no civ stats yet.", ephemeral=True)
+            return
+
+        # Sort by most played (wins + losses)
+        sorted_civs = sorted(
+            civ_stats.items(),
+            key=lambda x: x[1]["wins"] + x[1]["losses"],
+            reverse=True
+        )
+
+        e = discord.Embed(
+            title=f"🎭 Civ Stats — {target.display_name}",
+            color=0x9B59B6,
+            timestamp=datetime.now(timezone.utc),
+        )
+        e.set_thumbnail(url=target.display_avatar.url)
+
+        rows = []
+        for civ, stats in sorted_civs:
+            total   = stats["wins"] + stats["losses"]
+            win_pct = f"{(stats['wins']/total*100):.0f}%" if total > 0 else "0%"
+            rows.append(
+                f"**{civ}** — W:{stats['wins']} L:{stats['losses']} WR:{win_pct}"
+            )
+
+        # Split into two columns if many civs
+        if len(rows) > 6:
+            mid = len(rows) // 2
+            e.add_field(name="Civilization Stats", value="\n".join(rows[:mid]), inline=True)
+            e.add_field(name="\u200b", value="\n".join(rows[mid:]), inline=True)
+        else:
+            e.add_field(name="Civilization Stats", value="\n".join(rows), inline=False)
+        e.set_footer(text=f"Based on all finished matches • {interaction.guild.name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="aoe_h2h",
+        description="Show head to head match history between two players.",
+    )
+    @discord.app_commands.describe(
+        player1="First player",
+        player2="Second player",
+    )
+    async def aoe_h2h(self, interaction: discord.Interaction,
+                       player1: discord.Member, player2: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        gid = str(interaction.guild.id)
+
+        if player1.id == player2.id:
+            await interaction.followup.send("❌ Please select two different players!", ephemeral=True)
+            return
+
+        matches = await db.get_aoe_h2h(gid, str(player1.id), str(player2.id))
+
+        if not matches:
+            await interaction.followup.send(
+                f"❌ No matches found between **{player1.display_name}** and **{player2.display_name}**.",
+                ephemeral=True)
+            return
+
+        # Count H2H record
+        p1_wins = 0
+        p2_wins = 0
+        for m in matches:
+            p1_in_t1 = str(player1.id) in m["team1_ids"]
+            if (p1_in_t1 and m["result"] == "team1") or                (not p1_in_t1 and m["result"] == "team2"):
+                p1_wins += 1
+            else:
+                p2_wins += 1
+
+        e = discord.Embed(
+            title=f"⚔️ Head to Head",
+            title="Head to Head",
+            description=(
+                f"**{player1.display_name}** vs **{player2.display_name}**\n\n"
+                f"\U0001f534 {player1.display_name}: **{p1_wins}W**\n"
+                f"\U0001f535 {player2.display_name}: **{p2_wins}W**\n"
+                f"Total matches: **{len(matches)}**"
+            ),
+            color=0xE67E22,
+            timestamp=datetime.now(timezone.utc),
+        )
+        history_lines = []
+        for m in matches[:5]:
+            p1_in_t1 = str(player1.id) in m["team1_ids"]
+            p1_won   = (p1_in_t1 and m["result"] == "team1") or (not p1_in_t1 and m["result"] == "team2")
+            result   = "🏆" if p1_won else "💔"
+            p1_civ   = m["civ_data"].get(str(player1.id), "?")
+            p2_civ   = m["civ_data"].get(str(player2.id), "?")
+            qt       = m["queue_type"].upper()
+            date     = m["date"].strftime("%d %b") if m["date"] else "?"
+            history_lines.append(
+                f"{result} **#{m['id']}** {qt} — {player1.display_name} ({p1_civ}) vs {player2.display_name} ({p2_civ}) • {date}"
+            )
+
+        if history_lines:
+            e.add_field(
+                name=f"\U0001f4dc Last {len(history_lines)} Matches",
+                value="\n".join(history_lines),
+                inline=False
+            )
+
+        e.set_footer(text=f"Showing last {len(matches)} matches • {interaction.guild.name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+
 async def setup(bot):
     await bot.add_cog(AOEQueueCog(bot))
     logger.info("AOEQueueCog loaded.")
