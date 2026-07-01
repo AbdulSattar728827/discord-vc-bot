@@ -1710,6 +1710,12 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
     # ── Draft ──────────────────────────────────────────────────────────────────
 
     async def show_draft(self, interaction, match):
+        # DraftView._build() auto-assigns last player if only 1 remains.
+        # After that, draft_complete will be True — go to Teams Confirm instead.
+        DraftView(self, match)  # trigger auto-assign side effect if applicable
+        if match.draft_complete:
+            await self.show_teams_confirm(interaction, match)
+            return
         embed = await self._build_draft_embed(interaction.guild, match)
         view  = DraftView(self, match)
         await interaction.response.edit_message(embed=embed, view=view)
@@ -1786,9 +1792,10 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await interaction.message.edit(embed=embed, view=view)
 
     async def show_teams_confirm_refresh(self, interaction, match):
-        """Refresh teams confirm screen after a swap (no defer needed)."""
+        """Refresh teams confirm screen after a swap."""
         embed = self._build_teams_confirm_embed(match)
         view  = TeamsConfirmView(self, match)
+        await interaction.response.defer()
         await interaction.message.edit(embed=embed, view=view)
 
     async def show_teams_confirm_fresh(self, guild, match, thread):
