@@ -7,6 +7,7 @@ from discord.ext import commands
 import logging
 from datetime import datetime, timezone
 from database import db
+from cogs.utils import fmt, rank_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -21,18 +22,6 @@ MILESTONES = [
     (500,  "VC Immortal",   "⚡"),
     (1000, "VC GOD",        "🌟"),
 ]
-
-def fmt(seconds: float) -> str:
-    s = int(seconds)
-    h, r = divmod(s, 3600)
-    m, s = divmod(r, 60)
-    if h: return f"{h}h {m}m {s}s"
-    if m: return f"{m}m {s}s"
-    return f"{s}s"
-
-def rank_suffix(n: int) -> str:
-    if 11 <= (n % 100) <= 13: return f"{n}th"
-    return {1:f"{n}st",2:f"{n}nd",3:f"{n}rd"}.get(n%10, f"{n}th")
 
 def get_current_title(total_hours: float) -> tuple[str, str]:
     current = ("No Title Yet", "🎮")

@@ -178,21 +178,47 @@ class CoinsCog(commands.Cog, name="Coins"):
     async def _get_or_create_logs_channel(self, guild: discord.Guild):
         ch = discord.utils.get(guild.text_channels, name=LOGS_CHANNEL)
         if ch:
+            # Update permissions and move to Admin Panel category
+            try:
+                admin_category = discord.utils.find(
+                    lambda c: "admin" in c.name.lower(), guild.categories)
+                await ch.set_permissions(guild.default_role, view_channel=False)
+                await ch.set_permissions(guild.me,
+                    view_channel=True, send_messages=True, embed_links=True)
+                for role in guild.roles:
+                    if role.permissions.administrator:
+                        await ch.set_permissions(role,
+                            view_channel=True, send_messages=False)
+                if admin_category and ch.category != admin_category:
+                    await ch.edit(category=admin_category)
+                    logger.info("[%s] Moved #%s to Admin Panel", guild.id, LOGS_CHANNEL)
+            except Exception as ex:
+                logger.warning("[%s] Could not update #%s perms: %s", guild.id, LOGS_CHANNEL, ex)
             return ch
         try:
+            # Find Admin Panel category
+            admin_category = discord.utils.find(
+                lambda c: "admin" in c.name.lower(), guild.categories)
+
+            # Admin only — @everyone cannot see, bot can post
             overwrites = {
-                guild.default_role: discord.PermissionOverwrite(
-                    view_channel=True, send_messages=False
-                ),
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 guild.me: discord.PermissionOverwrite(
-                    view_channel=True, send_messages=True, embed_links=True
-                ),
+                    view_channel=True, send_messages=True, embed_links=True),
             }
+            # Give view access to any admin roles
+            for role in guild.roles:
+                if role.permissions.administrator:
+                    overwrites[role] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=False)
+
             ch = await guild.create_text_channel(
-                LOGS_CHANNEL, overwrites=overwrites,
+                LOGS_CHANNEL,
+                overwrites=overwrites,
+                category=admin_category,
                 topic="🧀 Cheese Coins activity log — VC creations and coin transactions",
             )
-            logger.info("[%s] Created #%s", guild.id, LOGS_CHANNEL)
+            logger.info("[%s] Created #%s in Admin Panel", guild.id, LOGS_CHANNEL)
         except discord.Forbidden:
             return None
         return ch
@@ -218,6 +244,9 @@ class CoinsCog(commands.Cog, name="Coins"):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        # Update cheese-logs channel permissions and category on startup
+        for guild in self.bot.guilds:
+            await self._get_or_create_logs_channel(guild)
         for guild in self.bot.guilds:
             await self._setup_join_to_create(guild)
             await self._update_coins_channel(guild)
@@ -228,7 +257,7 @@ class CoinsCog(commands.Cog, name="Coins"):
         """On startup, find any Private/Public VCs the bot created and track or delete them."""
         for vc in guild.voice_channels:
             # Match VCs that look like bot-created ones
-            is_private = vc.name == "🔒 Private VC"
+            is_private = vc.name.startswith("🔒") and "Private VC" in vc.name
             is_public  = any(
                 vc.name.startswith(f"{prefix} Public Voice")
                 for prefix in CATEGORY_PREFIX.values()
@@ -727,6 +756,10 @@ class CoinsCog(commands.Cog, name="Coins"):
                 results.append(f"❌ Cannot create in {keyword}: {e}")
 
         await interaction.followup.send("\n".join(results), ephemeral=True)
+    @discord.app_commands.command(
+        name="refreshcoins",
+        description="Refresh the Cheese Coins leaderboard (admin only).",
+    )
     @discord.app_commands.default_permissions(administrator=True)
     async def refreshcoins(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
