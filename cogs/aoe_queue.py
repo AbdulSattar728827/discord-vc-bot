@@ -2818,6 +2818,373 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         await interaction.followup.send(embed=e, ephemeral=True)
 
 
+    @discord.app_commands.command(
+        name="aoe_forceflip",
+        description="Force resolve the coin flip in an active match (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches)",
+        result="Coin flip result",
+        first_pick_team="Which team gets first pick",
+    )
+    @discord.app_commands.choices(
+        result=[
+            discord.app_commands.Choice(name="Heads", value="heads"),
+            discord.app_commands.Choice(name="Tails", value="tails"),
+        ],
+        first_pick_team=[
+            discord.app_commands.Choice(name="Team 1 🔴", value=1),
+            discord.app_commands.Choice(name="Team 2 🔵", value=2),
+        ]
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forceflip(self, interaction: discord.Interaction,
+                             match_id: int, result: str, first_pick_team: int):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+        if not match:
+            await interaction.followup.send(f"❌ No active match with ID **#{match_id}**.", ephemeral=True)
+            return
+        if match.phase not in ("coin_flip",):
+            await interaction.followup.send(
+                f"⚠️ Match **#{match_id}** is not in coin flip phase (current: {match.phase}).", ephemeral=True)
+            return
+        match.first_pick_team = first_pick_team
+        match.phase = "draft"
+        if match.thread:
+            try:
+                e = discord.Embed(
+                    title=f"🪙 Coin landed on **{result.upper()}**! (Admin Override)",
+                    description=f"Team {first_pick_team} has **First Pick**. Draft starting now.",
+                    color=0xF1C40F, timestamp=datetime.now(timezone.utc))
+                embed = await self._build_draft_embed(guild, match)
+                view  = DraftView(self, match)
+                await match.thread_message.edit(embed=embed, view=view)
+            except Exception as ex:
+                logger.warning("[%s] Could not update thread after forceflip: %s", guild.id, ex)
+        e = discord.Embed(title="✅ Coin Flip Force Resolved", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID",       value=f"#{match_id}",           inline=True)
+        e.add_field(name="🪙 Result",         value=result.upper(),           inline=True)
+        e.add_field(name="⚡ First Pick",     value=f"Team {first_pick_team}", inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        logger.info("[%s] Admin %s force-flipped match #%s → Team %s first pick",
+                    guild.id, interaction.user.display_name, match_id, first_pick_team)
+
+    @discord.app_commands.command(
+        name="aoe_forcepick",
+        description="Force pick a player from the pool into a team during draft (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches)",
+        player="Player to pick from the pool",
+        team="Which team to add the player to",
+    )
+    @discord.app_commands.choices(team=[
+        discord.app_commands.Choice(name="Team 1 🔴", value=1),
+        discord.app_commands.Choice(name="Team 2 🔵", value=2),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forcepick(self, interaction: discord.Interaction,
+                             match_id: int, player: discord.Member, team: int):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+        if not match:
+            await interaction.followup.send(f"❌ No active match with ID **#{match_id}**.", ephemeral=True)
+            return
+        if match.phase != "draft":
+            await interaction.followup.send(
+                f"⚠️ Match **#{match_id}** is not in draft phase (current: {match.phase}).", ephemeral=True)
+            return
+        if player not in match.remaining:
+            await interaction.followup.send(
+                f"❌ **{player.display_name}** is not in the player pool.", ephemeral=True)
+            return
+        # Add to correct team
+        match.remaining.remove(player)
+        if team == 1:
+            match.team1.append(player)
+        else:
+            match.team2.append(player)
+        # Check if draft is now complete
+        if not match.remaining:
+            match.draft_complete = True
+            match.phase = "teams_confirm"
+        if match.thread and match.thread_message:
+            try:
+                embed = await self._build_draft_embed(guild, match)
+                view  = DraftView(self, match) if not match.draft_complete else None
+                if match.draft_complete:
+                    await match.thread.send(
+                        f"✅ Draft complete! Proceeding to Teams Confirm.")
+                await match.thread_message.edit(embed=embed, view=view)
+            except Exception as ex:
+                logger.warning("[%s] Could not update thread after forcepick: %s", guild.id, ex)
+        e = discord.Embed(title="✅ Player Force Picked", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID", value=f"#{match_id}",              inline=True)
+        e.add_field(name="👤 Player",   value=player.display_name,         inline=True)
+        e.add_field(name="👥 Team",     value=f"Team {team}",              inline=True)
+        e.add_field(name="📍 Phase",    value=match.phase,                 inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="aoe_forceconfirm",
+        description="Skip Teams Confirm and go straight to civ selection (admin only).",
+    )
+    @discord.app_commands.describe(match_id="Match ID (use /aoe_listmatches)")
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forceconfirm(self, interaction: discord.Interaction, match_id: int):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+        if not match:
+            await interaction.followup.send(f"❌ No active match with ID **#{match_id}**.", ephemeral=True)
+            return
+        if match.phase != "teams_confirm":
+            await interaction.followup.send(
+                f"⚠️ Match **#{match_id}** is not in teams confirm phase (current: {match.phase}).", ephemeral=True)
+            return
+        await self._create_temp_vcs(guild, match)
+        match.phase = "civ_select"
+        if match.thread and match.thread_message:
+            try:
+                embed = self._build_civ_status_embed(guild, match)
+                view  = CivSelectView(self, match)
+                await match.thread_message.edit(embed=embed, view=view)
+                if match.temp_vc1 and match.temp_vc2:
+                    await match.thread.send("Two VCs created! Check team channels.")
+            except Exception as ex:
+                logger.warning("[%s] forceconfirm thread update failed: %s", guild.id, ex)
+        e = discord.Embed(title="Teams Confirmed (Admin)", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID", value=f"#{match_id}", inline=True)
+        e.add_field(name="📍 Now",      value="Civ Selection", inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="aoe_forcelockin",
+        description="Force lock in civs for a team (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches)",
+        team="Which team to lock in",
+    )
+    @discord.app_commands.choices(team=[
+        discord.app_commands.Choice(name="Team 1 🔴", value=1),
+        discord.app_commands.Choice(name="Team 2 🔵", value=2),
+        discord.app_commands.Choice(name="Both Teams", value=0),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forcelockin(self, interaction: discord.Interaction,
+                               match_id: int, team: int):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+        if not match:
+            await interaction.followup.send(f"❌ No active match with ID **#{match_id}**.", ephemeral=True)
+            return
+        if match.phase != "civ_select":
+            await interaction.followup.send(
+                f"⚠️ Match **#{match_id}** is not in civ selection phase (current: {match.phase}).", ephemeral=True)
+            return
+        # Assign "Random" to anyone who hasn't picked yet
+        for p in match.all_players:
+            if p.id not in match.civ_picks:
+                match.civ_picks[p.id] = "🎲 Random"
+        if team in (1, 0):
+            match.cap1_locked = True
+        if team in (2, 0):
+            match.cap2_locked = True
+        if match.civs_revealed:
+            await self._reveal_civs(match)
+        else:
+            if match.thread and match.thread_message:
+                try:
+                    embed = self._build_civ_status_embed(guild, match)
+                    view  = CivSelectView(self, match)
+                    await match.thread_message.edit(embed=embed, view=view)
+                except Exception:
+                    pass
+        label = "Both Teams" if team == 0 else f"Team {team}"
+        e = discord.Embed(title="✅ Civs Force Locked In", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID", value=f"#{match_id}", inline=True)
+        e.add_field(name="🔒 Locked",   value=label,          inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="aoe_forcemap",
+        description="Manually set the final map for a 1v1 match (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches)",
+        map_name="Map to set as the final map",
+    )
+    @discord.app_commands.choices(map_name=[
+        discord.app_commands.Choice(name=m, value=m) for m in [
+            "African Waters", "Archipelago", "Dry Arabia", "Forts",
+            "Gorge", "Hedgemaze", "Rocky River", "Sunkenlands", "West Lake"
+        ]
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forcemap(self, interaction: discord.Interaction,
+                            match_id: int, map_name: str):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+        if not match:
+            await interaction.followup.send(f"❌ No active match with ID **#{match_id}**.", ephemeral=True)
+            return
+        if match.queue_type != "1v1":
+            await interaction.followup.send("❌ Map veto is only for 1v1 matches.", ephemeral=True)
+            return
+        match.final_map    = map_name
+        match.map_veto_done = True
+        if match.thread:
+            try:
+                await match.thread.send(f"Map set by admin: **{map_name}**. Done by {interaction.user.mention}")
+            except Exception:
+                pass
+            except Exception:
+                pass
+        e = discord.Embed(title="✅ Map Force Set", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID", value=f"#{match_id}", inline=True)
+        e.add_field(name="🗺️ Map",      value=map_name,       inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="aoe_forceban",
+        description="Manually set a civ ban for a player in a 1v1 match (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches)",
+        player="Player whose ban to set",
+        civ="Civ to ban for the opponent",
+    )
+    @discord.app_commands.choices(civ=[
+        discord.app_commands.Choice(name=c, value=c) for c in [
+            "Chinese", "Jin Dynasty", "Zhu Xi's Legacy", "Abbasid Dynasty", "Ayyubids",
+            "Byzantines", "Macedonian Dynasty", "Delhi Sultanate", "Tughlaq Dynasty",
+            "English", "House of Lancaster", "French", "Jeanne d'Arc", "Templar Knights",
+            "Holy Roman Empire", "Order of the Dragon", "Japanese", "Sengoku Daimyo",
+            "Malians", "Mongols", "Golden Horde", "Ottomans", "Rus",
+        ]
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_forceban(self, interaction: discord.Interaction,
+                            match_id: int, player: discord.Member, civ: str):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+        if not match:
+            await interaction.followup.send(f"❌ No active match with ID **#{match_id}**.", ephemeral=True)
+            return
+        if match.queue_type != "1v1":
+            await interaction.followup.send("❌ Civ bans are only for 1v1 matches.", ephemeral=True)
+            return
+        if player not in match.all_players:
+            await interaction.followup.send(
+                f"❌ **{player.display_name}** is not in match **#{match_id}**.", ephemeral=True)
+            return
+        if player == match.captain1:
+            match.civ_ban_p1_choice = civ
+            match.civ_ban_p1_locked = True
+            banned_for = match.captain2.display_name
+        else:
+            match.civ_ban_p2_choice = civ
+            match.civ_ban_p2_locked = True
+            banned_for = match.captain1.display_name
+        if match.thread:
+            try:
+                await match.thread.send(
+                    f"🚫 **{player.display_name}** ban set to **{civ}** (for {banned_for}) by {interaction.user.mention}")
+            except Exception:
+                pass
+        e = discord.Embed(title="✅ Civ Ban Force Set", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID",  value=f"#{match_id}",      inline=True)
+        e.add_field(name="👤 Player",    value=player.display_name, inline=True)
+        e.add_field(name="🚫 Civ Banned", value=civ,               inline=True)
+        e.add_field(name="🎯 Banned For", value=banned_for,         inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+
+    @discord.app_commands.command(
+        name="aoe_changecaptain",
+        description="Change the captain of a team in an active match (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches)",
+        team="Which team's captain to change",
+        new_captain="New captain (must already be in the match)",
+    )
+    @discord.app_commands.choices(team=[
+        discord.app_commands.Choice(name="Team 1 🔴", value=1),
+        discord.app_commands.Choice(name="Team 2 🔵", value=2),
+    ])
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_changecaptain(self, interaction: discord.Interaction,
+                                 match_id: int, team: int, new_captain: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+        if not match:
+            await interaction.followup.send(f"❌ No active match with ID **#{match_id}**.", ephemeral=True)
+            return
+        if new_captain not in match.all_players:
+            await interaction.followup.send(
+                f"❌ **{new_captain.display_name}** is not in match **#{match_id}**.", ephemeral=True)
+            return
+        current_cap = match.captain1 if team == 1 else match.captain2
+        if new_captain == current_cap:
+            await interaction.followup.send(
+                f"⚠️ **{new_captain.display_name}** is already Team {team}'s captain!", ephemeral=True)
+            return
+        # Check new captain is on the correct team or in pool
+        team_members = match.team1 if team == 1 else match.team2
+        in_pool = new_captain in match.remaining
+        in_team = new_captain in team_members
+        other_team = match.team2 if team == 1 else match.team1
+        if new_captain in other_team:
+            await interaction.followup.send(
+                f"❌ **{new_captain.display_name}** is on the other team! "
+                f"Use `/aoe_swapplayers` first to move them.", ephemeral=True)
+            return
+        from_pool = in_pool
+        match.replace_captain(team, new_captain, from_pool=from_pool)
+        # Update thread name
+        if match.thread:
+            try:
+                await match.thread.edit(name=match.thread_name())
+                await match.thread.send(
+                    f"👑 **{new_captain.display_name}** is now the captain of Team {team}! "
+                    f"(Set by {interaction.user.mention})")
+            except Exception:
+                pass
+        old_cap_name = current_cap.display_name
+        e = discord.Embed(title="✅ Captain Changed", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID",    value=f"#{match_id}",              inline=True)
+        e.add_field(name="👥 Team",        value=f"Team {team}",              inline=True)
+        e.add_field(name="👑 New Captain", value=new_captain.display_name,    inline=True)
+        e.add_field(name="➡️ Old Captain", value=old_cap_name,               inline=True)
+        e.add_field(name="📍 Phase",       value=match.phase,                inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
+        logger.info("[%s] Admin %s changed Team %s captain from %s to %s in match #%s",
+                    guild.id, interaction.user.display_name, team,
+                    old_cap_name, new_captain.display_name, match_id)
+
+
 async def setup(bot):
     await bot.add_cog(AOEQueueCog(bot))
     logger.info("AOEQueueCog loaded.")
