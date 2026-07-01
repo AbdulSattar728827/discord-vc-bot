@@ -406,6 +406,13 @@ class DraftView(discord.ui.View):
             btn.callback = callback
             self.add_item(btn)
 
+        # If only 1 player remains after building buttons, auto-assign them
+        # This check runs at VIEW CREATION time — if we're here with 1 player,
+        # it means the previous pick left exactly 1 remaining, so auto-assign now
+        if len(self.match.remaining) == 1:
+            last_player = self.match.remaining[0]
+            self.match.pick_player(last_player)
+
         n          = len(self.match.remaining)
         cap_row    = min(max((n + 3) // 4, 1), 2)
         cancel_row = min(cap_row + 1, 4)
@@ -1390,7 +1397,6 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         # Find target VC — try exact name first, then partial match
         target_vc = discord.utils.get(guild.voice_channels, name=AOE_GENERAL_VC_NAME)
         if not target_vc:
-            # Fallback: find any VC with "Team 1" in the AOE category
             category = find_aoe_category(guild)
             if category:
                 target_vc = discord.utils.find(
@@ -1412,11 +1418,16 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
                     try:
                         await member.move_to(target_vc)
                         logger.info("[%s] Moved %s → %s", guild.id, member.display_name, target_vc.name)
+                        # Small delay between each move so Discord has time to
+                        # properly apply the target VC's permissions to the member.
+                        # Without this delay members arrive "muted" and have to
+                        # rejoin manually to get speaking permissions.
+                        await asyncio.sleep(0.5)
                     except Exception as ex:
                         logger.error("[%s] Could not move %s to %s: %s",
                                      guild.id, member.display_name, target_vc.name, ex)
-            # Small delay to ensure moves complete before deleting
-            await asyncio.sleep(1)
+            # Small delay to ensure all moves complete before deleting
+            await asyncio.sleep(2)
             try:
                 await temp_vc.delete(reason=f"Match #{match.match_id} ended")
                 logger.info("[%s] Deleted temp VC: %s", guild.id, temp_vc.name)
