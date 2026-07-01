@@ -274,7 +274,7 @@ class QueueView(discord.ui.View):
 
 class CoinFlipView(discord.ui.View):
     def __init__(self, cog, match: MatchState, flipper):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
         self.cog     = cog
         self.match   = match
         self.flipper = flipper
@@ -350,7 +350,7 @@ class CoinFlipView(discord.ui.View):
 
 class FirstPickView(discord.ui.View):
     def __init__(self, cog, match: MatchState, winner):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
         self.cog    = cog
         self.match  = match
         self.winner = winner
@@ -381,7 +381,7 @@ class FirstPickView(discord.ui.View):
 
 class DraftView(discord.ui.View):
     def __init__(self, cog, match: MatchState):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
         self._build()
@@ -468,7 +468,7 @@ class DraftView(discord.ui.View):
 
 class ChangeCaptainView(discord.ui.View):
     def __init__(self, cog, match: MatchState, team: int):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
         self.team  = team
@@ -548,7 +548,7 @@ class ChangeCaptainView(discord.ui.View):
 class ChangeCaptainFromFlipView(discord.ui.View):
     """Same as ChangeCaptainView but returns to coin flip screen after swap."""
     def __init__(self, cog, match: MatchState, team: int):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.cog          = cog
         self.match        = match
         self.team         = team
@@ -616,7 +616,7 @@ class ChangeCaptainFromFlipView(discord.ui.View):
 
 class MapVetoCoinFlipView(discord.ui.View):
     def __init__(self, cog, match: MatchState, flipper):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
         self.cog     = cog
         self.match   = match
         self.flipper = flipper
@@ -643,7 +643,7 @@ class MapVetoCoinFlipView(discord.ui.View):
 class MapVetoOrderChoiceView(discord.ui.View):
     """Coin flip winner chooses to ban first or second in map veto."""
     def __init__(self, cog, match: MatchState, winner):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
         self.cog    = cog
         self.match  = match
         self.winner = winner
@@ -674,7 +674,7 @@ class MapVetoOrderChoiceView(discord.ui.View):
 
 class MapVetoView(discord.ui.View):
     def __init__(self, cog, match: MatchState):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
         self._build()
@@ -708,7 +708,7 @@ class MapVetoView(discord.ui.View):
 
 class CivBanView(discord.ui.View):
     def __init__(self, cog, match: MatchState):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
         self._build()
@@ -820,7 +820,7 @@ class CivBanView(discord.ui.View):
 
 class CivSelectView(discord.ui.View):
     def __init__(self, cog, match: MatchState):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
         self._build()
@@ -959,7 +959,7 @@ class CivSelectView(discord.ui.View):
 
 class TeamsConfirmView(discord.ui.View):
     def __init__(self, cog, match: MatchState):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
 
@@ -991,7 +991,7 @@ class TeamsConfirmView(discord.ui.View):
 class SwapTeam1SelectView(discord.ui.View):
     """Step 1 — pick player from Team 1 (no captains)."""
     def __init__(self, cog, match: MatchState):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
 
@@ -1032,7 +1032,7 @@ class SwapTeam1SelectView(discord.ui.View):
 class SwapTeam2SelectView(discord.ui.View):
     """Step 2 — pick player from Team 2 (no captains)."""
     def __init__(self, cog, match: MatchState, p1):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
         self.p1    = p1
@@ -1083,7 +1083,7 @@ class SwapTeam2SelectView(discord.ui.View):
 
 class PreMatchView(discord.ui.View):
     def __init__(self, cog, match: MatchState):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.cog   = cog
         self.match = match
 
