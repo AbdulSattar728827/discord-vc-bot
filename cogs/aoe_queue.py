@@ -550,28 +550,35 @@ class ChangeCaptainFromFlipView(discord.ui.View):
         current_cap  = match.captain1 if team == 1 else match.captain2
         self.current_cap_id = current_cap.id
 
-        # Only team members can be swapped (no pool during coin flip phase)
-        options = [m for m in team_members if m != current_cap]
+        # At coin flip stage teams only have the captain — include pool players too
+        team_options = [m for m in team_members if m != current_cap]
+        pool_options = list(match.remaining)
+        all_options  = team_options + pool_options
 
-        if options:
+        if all_options:
+            select_opts = []
+            for m in all_options:
+                label = f"{m.display_name} (Pool)" if m in pool_options else f"{m.display_name} (Team {team})"
+                select_opts.append(discord.SelectOption(label=label, value=str(m.id)))
+
             select = discord.ui.Select(
                 placeholder=f"Select new Team {team} Captain...",
-                options=[discord.SelectOption(label=m.display_name, value=str(m.id)) for m in options],
+                options=select_opts,
             )
             async def on_select(interaction: discord.Interaction):
-                is_this_cap  = interaction.user.id == self.current_cap_id
+                is_this_cap   = interaction.user.id == self.current_cap_id
                 is_privileged = self.cog._is_admin_or_privileged(interaction.user)
                 if not is_this_cap and not is_privileged:
                     await interaction.response.send_message(
                         f"❌ Only Team {self.team}'s captain or an admin can do this!", ephemeral=True)
                     return
                 new_id  = int(select.values[0])
-                new_cap = discord.utils.get(options, id=new_id)
+                new_cap = discord.utils.get(all_options, id=new_id)
                 if not new_cap:
                     await interaction.response.send_message("❌ Player not found!", ephemeral=True)
                     return
-                # Swap within team only (no pool during flip phase)
-                match.replace_captain(team, new_cap, from_pool=False)
+                from_pool = new_cap in pool_options
+                match.replace_captain(team, new_cap, from_pool=from_pool)
                 if match.thread:
                     try:
                         await match.thread.edit(name=match.thread_name())
@@ -584,7 +591,7 @@ class ChangeCaptainFromFlipView(discord.ui.View):
             self.add_item(select)
         else:
             select = discord.ui.Select(
-                placeholder="No other team members to swap with",
+                placeholder="No players available to swap with",
                 options=[discord.SelectOption(label="None", value="none")],
                 disabled=True,
             )
@@ -1350,9 +1357,11 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         }
         try:
             vc1 = await guild.create_voice_channel(
-                f"Match #{match.match_id} Team 1", category=category, overwrites=overwrites)
+                f"Match #{match.match_id} Team 1", category=category,
+                overwrites=overwrites, rtc_region="singapore")
             vc2 = await guild.create_voice_channel(
-                f"Match #{match.match_id} Team 2", category=category, overwrites=overwrites)
+                f"Match #{match.match_id} Team 2", category=category,
+                overwrites=overwrites, rtc_region="singapore")
             match.temp_vc1 = vc1
             match.temp_vc2 = vc2
             logger.info("[%s] Created temp VCs for match #%s", guild.id, match.match_id)
@@ -2678,6 +2687,124 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
         logger.info("[%s] Admin %s removed %s from leaderboard (%s)",
                     interaction.guild.id, interaction.user.display_name,
                     member.display_name, label)
+
+
+    @discord.app_commands.command(
+        name="aoe_swapplayers",
+        description="Swap two non-captain players between teams in an active match (admin only).",
+    )
+    @discord.app_commands.describe(
+        match_id="Match ID (use /aoe_listmatches)",
+        player1="Player from Team 1 to swap",
+        player2="Player from Team 2 to swap",
+    )
+    @discord.app_commands.default_permissions(administrator=True)
+    async def aoe_swapplayers(self, interaction: discord.Interaction,
+                               match_id: int,
+                               player1: discord.Member,
+                               player2: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        match = self._find_match_by_id(guild, match_id)
+
+        if not match:
+            await interaction.followup.send(
+                f"❌ No active match with ID **#{match_id}**. Use `/aoe_listmatches`.",
+                ephemeral=True)
+            return
+
+        # Verify both players are in the match
+        if player1 not in match.all_players:
+            await interaction.followup.send(
+                f"❌ **{player1.display_name}** is not in match **#{match_id}**.", ephemeral=True)
+            return
+        if player2 not in match.all_players:
+            await interaction.followup.send(
+                f"❌ **{player2.display_name}** is not in match **#{match_id}**.", ephemeral=True)
+            return
+
+        # Verify they're on different teams
+        team1 = match.team_of(player1)
+        team2 = match.team_of(player2)
+        if team1 == team2:
+            await interaction.followup.send(
+                f"❌ Both players are on the same team! You can only swap players from different teams.",
+                ephemeral=True)
+            return
+
+        # Prevent swapping captains
+        if player1 == match.captain1 or player1 == match.captain2:
+            await interaction.followup.send(
+                f"❌ **{player1.display_name}** is a captain and cannot be swapped. "
+                f"Use `/aoe_changeplayer` to replace a captain.", ephemeral=True)
+            return
+        if player2 == match.captain1 or player2 == match.captain2:
+            await interaction.followup.send(
+                f"❌ **{player2.display_name}** is a captain and cannot be swapped. "
+                f"Use `/aoe_changeplayer` to replace a captain.", ephemeral=True)
+            return
+
+        # Make sure player1 is from team1 and player2 is from team2
+        # (swap so player1 = team1 player, player2 = team2 player)
+        if team1 == 2:
+            player1, player2 = player2, player1
+            team1, team2 = team2, team1
+
+        # Perform the swap
+        idx1 = match.team1.index(player1)
+        idx2 = match.team2.index(player2)
+        match.team1[idx1] = player2
+        match.team2[idx2] = player1
+
+        # Handle VC moves if in civ select or in_match phase
+        if match.phase in ("civ_select", "in_match", "pre_match"):
+            # Move player1 (now in team2) to temp_vc2
+            if match.temp_vc2:
+                m1 = guild.get_member(player1.id)
+                if m1 and m1.voice:
+                    try:
+                        await m1.move_to(match.temp_vc2)
+                    except Exception:
+                        pass
+            # Move player2 (now in team1) to temp_vc1
+            if match.temp_vc1:
+                m2 = guild.get_member(player2.id)
+                if m2 and m2.voice:
+                    try:
+                        await m2.move_to(match.temp_vc1)
+                    except Exception:
+                        pass
+
+        # Transfer civ picks if they had them
+        civ1 = match.civ_picks.pop(player1.id, None)
+        civ2 = match.civ_picks.pop(player2.id, None)
+        if civ1:
+            match.civ_picks[player2.id] = civ1
+        if civ2:
+            match.civ_picks[player1.id] = civ2
+
+        # Notify in thread
+        if match.thread:
+            try:
+                await match.thread.send(
+                    f"🔄 **{player1.display_name}** (Team 1) ↔ **{player2.display_name}** (Team 2) have been swapped by {interaction.user.mention}"
+                )
+            except Exception:
+                pass
+
+        logger.info("[%s] Admin %s swapped %s (T1) ↔ %s (T2) in match #%s",
+                    guild.id, interaction.user.display_name,
+                    player1.display_name, player2.display_name, match_id)
+
+        e = discord.Embed(title="✅ Players Swapped", color=0x57F287,
+                          timestamp=datetime.now(timezone.utc))
+        e.add_field(name="🎮 Match ID",  value=f"#{match_id}",           inline=True)
+        e.add_field(name="📋 Queue",     value=match.queue_type.upper(), inline=True)
+        e.add_field(name="🔴 → 🔵",     value=f"{player1.display_name} moved to Team 2", inline=False)
+        e.add_field(name="🔵 → 🔴",     value=f"{player2.display_name} moved to Team 1", inline=False)
+        e.add_field(name="📍 Phase",     value=match.phase,              inline=True)
+        e.set_footer(text=f"Done by {interaction.user.display_name}")
+        await interaction.followup.send(embed=e, ephemeral=True)
 
 
 async def setup(bot):
