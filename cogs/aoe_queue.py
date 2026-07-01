@@ -3280,7 +3280,6 @@ class AOEQueueCog(commands.Cog, name="AOEQueue"):
 
         e = discord.Embed(
             title=f"⚔️ Head to Head",
-            title="Head to Head",
             description=(
                 f"**{player1.display_name}** vs **{player2.display_name}**\n\n"
                 f"\U0001f534 {player1.display_name}: **{p1_wins}W**\n"
